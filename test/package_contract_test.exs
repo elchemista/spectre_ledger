@@ -9,7 +9,7 @@ defmodule SpectreLedger.PackageContractTest do
     assert {:ok, package} = Installable.verify(Spectre.Ledger)
     assert package.id == :spectre_ledger
     assert package.version == "0.1.0"
-    assert package.spectre == ">= 0.3.1 and < 0.4.0"
+    assert package.spectre == "~> 0.3.1"
     assert package.agent_extensions == []
     assert package.operations == []
     assert package.actions == []

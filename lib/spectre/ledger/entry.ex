@@ -4,6 +4,8 @@ defmodule Spectre.Ledger.Entry do
 
   It references a Spectre checkpoint by both its Foundation semantic digest
   and its raw byte digest. It does not duplicate the checkpoint schema.
+  Namespace, timestamps, and owner fencing metadata are deliberately outside
+  the content identity so a verified chain remains portable across hosts.
   """
 
   alias Spectre.Canonical.Value
@@ -76,6 +78,7 @@ defmodule Spectre.Ledger.Entry do
   @spec to_data(t()) :: map()
   def to_data(%__MODULE__{} = entry) do
     identity(entry)
+    |> Map.put("owner_fencing_token", entry.owner_fencing_token)
     |> Map.put("entry_digest", entry.entry_digest)
   end
 
@@ -153,43 +156,65 @@ defmodule Spectre.Ledger.Entry do
       "checkpoint_digest" => entry.checkpoint_digest,
       "blob_digest" => entry.blob_digest,
       "previous_entry_digest" => entry.previous_entry_digest,
-      "source_entry_digest" => entry.source_entry_digest,
-      "owner_fencing_token" => entry.owner_fencing_token
+      "source_entry_digest" => entry.source_entry_digest
     }
   end
 
   @spec validate_fields(t()) :: :ok | {:error, term()}
   defp validate_fields(%__MODULE__{} = entry) do
+    with :ok <- validate_stream_key(entry.stream_key),
+         :ok <- validate_kind(entry.kind),
+         :ok <- validate_revisions(entry.expected_revision, entry.revision),
+         :ok <- validate_content_digests(entry.checkpoint_digest, entry.blob_digest),
+         :ok <-
+           validate_chain_digests(entry.previous_entry_digest, entry.source_entry_digest),
+         :ok <- validate_fencing_token(entry.owner_fencing_token) do
+      validate_entry_digest(entry.entry_digest)
+    end
+  end
+
+  defp validate_stream_key(value) when is_binary(value) and value != "", do: :ok
+  defp validate_stream_key(_value), do: {:error, :invalid_ledger_stream_key}
+
+  defp validate_kind(value) when value in [:checkpoint, :migration], do: :ok
+  defp validate_kind(_value), do: {:error, :invalid_ledger_entry_kind}
+
+  defp validate_revisions(expected, revision) do
     cond do
-      not (is_binary(entry.stream_key) and entry.stream_key != "") ->
-        {:error, :invalid_ledger_stream_key}
-
-      entry.kind not in [:checkpoint, :migration] ->
-        {:error, :invalid_ledger_entry_kind}
-
-      not non_negative?(entry.expected_revision) or not non_negative?(entry.revision) ->
+      not non_negative?(expected) or not non_negative?(revision) ->
         {:error, :invalid_ledger_revision}
 
-      entry.revision <= entry.expected_revision ->
+      revision <= expected ->
         {:error, :non_advancing_ledger_revision}
-
-      not digest?(entry.checkpoint_digest) or not digest?(entry.blob_digest) ->
-        {:error, :invalid_ledger_content_digest}
-
-      not optional_digest?(entry.previous_entry_digest) or
-          not optional_digest?(entry.source_entry_digest) ->
-        {:error, :invalid_ledger_chain_digest}
-
-      not (is_nil(entry.owner_fencing_token) or non_negative?(entry.owner_fencing_token)) ->
-        {:error, :invalid_owner_fencing_token}
-
-      entry.entry_digest != "" and not digest?(entry.entry_digest) ->
-        {:error, :invalid_ledger_entry_digest}
 
       true ->
         :ok
     end
   end
+
+  defp validate_content_digests(checkpoint_digest, blob_digest) do
+    if digest?(checkpoint_digest) and digest?(blob_digest),
+      do: :ok,
+      else: {:error, :invalid_ledger_content_digest}
+  end
+
+  defp validate_chain_digests(previous_entry_digest, source_entry_digest) do
+    if optional_digest?(previous_entry_digest) and optional_digest?(source_entry_digest),
+      do: :ok,
+      else: {:error, :invalid_ledger_chain_digest}
+  end
+
+  defp validate_fencing_token(nil), do: :ok
+  defp validate_fencing_token(value) when is_integer(value) and value >= 0, do: :ok
+  defp validate_fencing_token(_value), do: {:error, :invalid_owner_fencing_token}
+
+  defp validate_entry_digest(""), do: :ok
+
+  defp validate_entry_digest(value) when is_binary(value) do
+    if digest?(value), do: :ok, else: {:error, :invalid_ledger_entry_digest}
+  end
+
+  defp validate_entry_digest(_value), do: {:error, :invalid_ledger_entry_digest}
 
   defp decode_kind("checkpoint"), do: {:ok, :checkpoint}
   defp decode_kind("migration"), do: {:ok, :migration}

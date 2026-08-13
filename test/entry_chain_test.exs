@@ -17,6 +17,10 @@ defmodule SpectreLedger.EntryChainTest do
     assert {:ok, ^entry} = entry |> Entry.to_data() |> Entry.from_data()
     assert :ok = Entry.verify(entry)
 
+    {:ok, reissued} = Entry.new(%{write(0, 3, "a", "b") | owner_fencing_token: 99}, nil)
+    assert reissued.entry_digest == entry.entry_digest
+    refute reissued.owner_fencing_token == entry.owner_fencing_token
+
     assert {:error, :ledger_entry_digest_mismatch} =
              entry
              |> Entry.to_data()

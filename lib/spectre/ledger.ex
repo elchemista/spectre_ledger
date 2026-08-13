@@ -11,7 +11,7 @@ defmodule Spectre.Ledger do
     id: :spectre_ledger,
     version: "0.1.0",
     contract: 1,
-    spectre: ">= 0.3.1 and < 0.4.0",
+    spectre: "~> 0.3.1",
     provides: [
       {:contract, {:spectre, :instance_checkpoint_store, 1}},
       {:service, {:spectre_ledger, :checkpoint_archive, 1}}
