@@ -37,11 +37,14 @@ defmodule Spectre.Ledger.Doctor.Report do
 
   def format(%__MODULE__{} = report, :text) do
     data = to_map(report)
+    core = CoreReport.format(report.core, :text)
     checks = Enum.map_join(data.checks, "\n", &check_line/1)
     summary = data.summary
 
     """
     Spectre Ledger doctor #{data.ledger_version}: #{data.status}
+    #{core}
+
     #{checks}
 
     Summary (including Spectre core): #{summary.passed} passed, #{summary.warnings} warnings, #{summary.errors} errors, #{summary.skipped} skipped

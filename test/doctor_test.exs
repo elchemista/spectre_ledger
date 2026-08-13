@@ -194,6 +194,16 @@ defmodule SpectreLedger.DoctorTest do
     assert Enum.all?(measurements, fn {_key, value} -> is_number(value) end)
   end
 
+  test "text output includes the core checks that contribute to its summary" do
+    assert {:ok, report} = Doctor.run(core: [packages: []])
+    assert report.status == :error
+    assert report.summary.errors > 0
+
+    text = Report.format(report, :text)
+    assert text =~ "packages.compatibility"
+    assert text =~ "packages_empty"
+  end
+
   test "mix task emits JSON, accepts warnings normally, and strict mode fails" do
     Mix.shell(Mix.Shell.Process)
 
