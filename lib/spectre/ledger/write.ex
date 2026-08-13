@@ -1,5 +1,11 @@
 defmodule Spectre.Ledger.Write do
-  @moduledoc false
+  @moduledoc """
+  Validated internal handoff from the Spectre Checkpoint Store to a backend.
+
+  Applications normally construct this through
+  `Spectre.Ledger.CheckpointStore`; it is public so third-party Ledger backends
+  can implement the backend contract without depending on private structs.
+  """
 
   alias Spectre.Instance.Ref
 

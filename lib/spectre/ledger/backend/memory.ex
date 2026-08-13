@@ -90,6 +90,15 @@ defmodule Spectre.Ledger.Backend.Memory do
   end
 
   @impl Spectre.Ledger.Backend
+  def objects(%Config{} = config, stream_key, opts) do
+    with :ok <- valid_stream_key(stream_key),
+         :ok <- no_object_options(opts),
+         {:ok, server, timeout} <- server(config) do
+      GenServer.call(server, {:objects, config.namespace, stream_key}, timeout)
+    end
+  end
+
+  @impl Spectre.Ledger.Backend
   def migrate(
         %Config{} = config,
         %Ref{} = legacy_ref,
@@ -154,6 +163,18 @@ defmodule Spectre.Ledger.Backend.Memory do
       end
 
     {:reply, {:ok, entries}, state}
+  end
+
+  def handle_call({:objects, namespace, stream_key}, _from, state) do
+    space = namespace(state, namespace)
+
+    objects =
+      case Map.fetch(space.streams, stream_key) do
+        {:ok, %{blobs: blobs}} -> blobs
+        :error -> %{}
+      end
+
+    {:reply, {:ok, objects}, state}
   end
 
   def handle_call({:compare_and_swap, namespace, write}, _from, state) do
@@ -299,6 +320,9 @@ defmodule Spectre.Ledger.Backend.Memory do
       Map.get(space.aliases, legacy_key) == stable_key ->
         :ok
 
+      Enum.any?(space.aliases, fn {_alias_key, target_key} -> target_key == legacy_key end) ->
+        {:error, :ledger_migration_source_has_aliases}
+
       Map.has_key?(space.aliases, legacy_key) ->
         {:error, {:alias_conflict, legacy_key}}
 
@@ -333,12 +357,20 @@ defmodule Spectre.Ledger.Backend.Memory do
         :error ->
           {:ok, candidate}
 
-        {:ok, ^candidate} ->
-          {:ok, candidate}
-
         {:ok, current} ->
-          {:error, {:migration_target_conflict, List.last(current.entries).revision}}
+          verify_migration_target(current, entry, write)
       end
+    end
+  end
+
+  @spec verify_migration_target(stream(), Entry.t(), Write.t()) ::
+          {:ok, stream()} | {:error, term()}
+  defp verify_migration_target(current, entry, write) do
+    if List.last(current.entries).entry_digest == entry.entry_digest and
+         current.checkpoint == write.checkpoint do
+      {:ok, current}
+    else
+      {:error, {:migration_target_conflict, List.last(current.entries).revision}}
     end
   end
 
@@ -383,7 +415,8 @@ defmodule Spectre.Ledger.Backend.Memory do
         with true <- is_binary(blob),
              true <- byte_size(blob) in 1..max_bytes,
              true <- sha256(blob) == entry.blob_digest,
-             {:ok, report} <- Foundation.verify_instance_checkpoint(blob),
+             {:ok, report} <-
+               Foundation.verify_instance_checkpoint(blob, entry.stream_key),
              true <- report.digest == entry.checkpoint_digest,
              true <- report.revision == entry.revision do
           :ok
@@ -406,7 +439,7 @@ defmodule Spectre.Ledger.Backend.Memory do
          true <- write.byte_size == byte_size(write.checkpoint),
          true <- write.byte_size in 1..config.max_checkpoint_bytes,
          true <- sha256(write.checkpoint) == write.blob_digest,
-         {:ok, report} <- Foundation.verify_instance_checkpoint(write.checkpoint),
+         {:ok, report} <- Foundation.verify_instance_checkpoint(write.checkpoint, write.ref),
          true <- report.digest == write.checkpoint_digest,
          true <- report.revision == write.revision do
       :ok
@@ -466,6 +499,14 @@ defmodule Spectre.Ledger.Backend.Memory do
   defp entry_limit(value) when is_integer(value) and value > 0, do: {:ok, value}
   defp entry_limit(_value), do: {:error, :invalid_ledger_entry_limit}
 
+  defp no_object_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and opts == [],
+      do: :ok,
+      else: {:error, :invalid_ledger_object_query}
+  end
+
+  defp no_object_options(_opts), do: {:error, :invalid_ledger_object_query}
+
   @spec select_entries([Entry.t()], map()) :: [Entry.t()]
   defp select_entries(entries, %{after_revision: after_revision, limit: limit}) do
     selected = Enum.drop_while(entries, &(&1.revision <= after_revision))
@@ -473,15 +514,15 @@ defmodule Spectre.Ledger.Backend.Memory do
   end
 
   @spec resolve_alias(map(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  defp resolve_alias(aliases, stream_key), do: resolve_alias(aliases, stream_key, MapSet.new())
+  defp resolve_alias(aliases, stream_key), do: resolve_alias(aliases, stream_key, %{})
 
   defp resolve_alias(aliases, stream_key, seen) do
     cond do
-      MapSet.member?(seen, stream_key) ->
+      Map.has_key?(seen, stream_key) ->
         {:error, :ledger_alias_cycle}
 
       target = Map.get(aliases, stream_key) ->
-        resolve_alias(aliases, target, MapSet.put(seen, stream_key))
+        resolve_alias(aliases, target, Map.put(seen, stream_key, true))
 
       true ->
         {:ok, stream_key}

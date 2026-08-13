@@ -27,6 +27,7 @@ defmodule Spectre.Ledger.Config do
 
   def new(opts) when is_list(opts) do
     with true <- Keyword.keyword?(opts),
+         true <- unique_keys?(opts),
          {:ok, backend} <- backend(Keyword.get(opts, :backend, :memory)),
          {:ok, namespace} <- namespace(Keyword.get(opts, :namespace, @default_namespace)),
          {:ok, max_bytes} <-
@@ -95,4 +96,9 @@ defmodule Spectre.Ledger.Config do
     do: {:ok, value}
 
   defp max_checkpoint_bytes(_value), do: {:error, :invalid_max_checkpoint_bytes}
+
+  defp unique_keys?(opts) do
+    keys = Keyword.keys(opts)
+    length(keys) == length(Enum.uniq(keys))
+  end
 end

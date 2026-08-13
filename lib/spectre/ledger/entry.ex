@@ -164,7 +164,7 @@ defmodule Spectre.Ledger.Entry do
   defp validate_fields(%__MODULE__{} = entry) do
     with :ok <- validate_stream_key(entry.stream_key),
          :ok <- validate_kind(entry.kind),
-         :ok <- validate_revisions(entry.expected_revision, entry.revision),
+         :ok <- validate_revisions(entry.kind, entry.expected_revision, entry.revision),
          :ok <- validate_content_digests(entry.checkpoint_digest, entry.blob_digest),
          :ok <-
            validate_chain_digests(entry.previous_entry_digest, entry.source_entry_digest),
@@ -179,7 +179,9 @@ defmodule Spectre.Ledger.Entry do
   defp validate_kind(value) when value in [:checkpoint, :migration], do: :ok
   defp validate_kind(_value), do: {:error, :invalid_ledger_entry_kind}
 
-  defp validate_revisions(expected, revision) do
+  defp validate_revisions(:migration, 0, 0), do: :ok
+
+  defp validate_revisions(_kind, expected, revision) do
     cond do
       not non_negative?(expected) or not non_negative?(revision) ->
         {:error, :invalid_ledger_revision}

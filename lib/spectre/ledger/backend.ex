@@ -20,10 +20,12 @@ defmodule Spectre.Ledger.Backend do
               :not_found | {:ok, Entry.t()} | {:error, term()}
   @callback entries(Config.t(), String.t(), keyword()) ::
               {:ok, [Entry.t()]} | {:error, term()}
+  @callback objects(Config.t(), String.t(), keyword()) ::
+              {:ok, %{String.t() => binary()}} | {:error, term()}
   @callback migrate(Config.t(), Ref.t(), Ref.t(), binary() | map(), Write.t()) ::
               {:ok, :moved | :aliased} | {:error, term()}
   @callback put_stream(Config.t(), String.t(), [Entry.t()], %{String.t() => binary()}) ::
               {:ok, :imported | :idempotent} | {:error, term()}
 
-  @optional_callbacks migrate: 5, put_stream: 4
+  @optional_callbacks migrate: 5
 end

@@ -59,6 +59,39 @@ defmodule SpectreLedger.EntryChainTest do
     assert {:error, :ledger_chain_stream_mismatch} = Chain.verify([first, second])
   end
 
+  test "an offline migration can preserve a revision-zero checkpoint" do
+    migration = %{write(0, 1, "a", "b") | kind: :migration, revision: 0}
+
+    assert {:ok, entry} = Entry.new(migration, nil)
+    assert entry.revision == 0
+    assert {:ok, %{head_revision: 0}} = Chain.verify([entry])
+  end
+
+  test "entry decoder rejects unknown versions and every invalid portable field" do
+    {:ok, entry} = Entry.new(write(0, 1, "a", "b"), nil)
+    data = Entry.to_data(entry)
+
+    assert {:error, {:unsupported_ledger_entry_version, 99}} =
+             Entry.from_data(%{"entry_version" => 99})
+
+    assert {:error, :invalid_ledger_entry} = Entry.from_data(%{})
+
+    assert {:error, :invalid_ledger_entry_kind} =
+             data |> Map.put("kind", "unknown") |> Entry.from_data()
+
+    assert {:error, :invalid_ledger_stream_key} = Entry.verify(%{entry | stream_key: ""})
+    assert {:error, :invalid_ledger_entry_kind} = Entry.verify(%{entry | kind: :unknown})
+
+    assert {:error, :invalid_owner_fencing_token} =
+             Entry.verify(%{entry | owner_fencing_token: -1})
+
+    assert {:error, :invalid_ledger_entry_digest} = Entry.verify(%{entry | entry_digest: :bad})
+
+    assert {:error, :invalid_ledger_chain} = Chain.verify(:invalid)
+    assert {:error, :empty_ledger_chain} = Chain.verify([])
+    assert {:error, :invalid_ledger_chain_entry} = Chain.verify([:invalid])
+  end
+
   defp write(expected, revision, checkpoint_seed, blob_seed) do
     %Write{
       ref: instance_ref("subject"),

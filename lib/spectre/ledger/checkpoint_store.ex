@@ -12,23 +12,34 @@ defmodule Spectre.Ledger.CheckpointStore do
   alias Spectre.Foundation.Conformance, as: Foundation
   alias Spectre.Instance.Ref
   alias Spectre.Ledger.Config
+  alias Spectre.Ledger.Telemetry
   alias Spectre.Ledger.Write
 
   @impl Spectre.Instance.CheckpointStore
   def load(%Ref{} = ref, opts) do
-    with {:ok, config} <- Config.new(opts),
-         :ok <- backend_callback(config.backend, :load, 2) do
-      config.backend.load(config, ref)
-    end
+    observe(:load, ref, opts, %{}, fn ->
+      with {:ok, config} <- Config.new(opts),
+           :ok <- backend_callback(config.backend, :load, 2) do
+        config.backend.load(config, ref)
+      end
+    end)
   end
 
   @impl Spectre.Instance.CheckpointStore
   def compare_and_swap(%Ref{} = ref, checkpoint, expected, revision, opts) do
-    with {:ok, config} <- Config.new(opts),
-         {:ok, write} <- prepare(ref, checkpoint, expected, revision, opts, config),
-         :ok <- backend_callback(config.backend, :compare_and_swap, 2) do
-      config.backend.compare_and_swap(config, write)
-    end
+    observe(
+      :compare_and_swap,
+      ref,
+      opts,
+      %{byte_count: safe_byte_size(checkpoint), expected_revision: expected, revision: revision},
+      fn ->
+        with {:ok, config} <- Config.new(opts),
+             {:ok, write} <- prepare(ref, checkpoint, expected, revision, opts, config),
+             :ok <- backend_callback(config.backend, :compare_and_swap, 2) do
+          config.backend.compare_and_swap(config, write)
+        end
+      end
+    )
   end
 
   @impl Spectre.Instance.CheckpointStore
@@ -39,22 +50,27 @@ defmodule Spectre.Ledger.CheckpointStore do
         migrated_checkpoint,
         opts
       ) do
-    with {:ok, config} <- Config.new(opts),
-         :ok <- backend_callback(config.backend, :migrate, 5),
-         {:ok, source_digest} <- source_digest(config, legacy_ref),
-         {:ok, report} <- Foundation.verify_instance_checkpoint(migrated_checkpoint),
-         {:ok, write} <-
-           prepare(
-             stable_ref,
-             migrated_checkpoint,
-             0,
-             report.revision,
-             Keyword.put(opts, :source_entry_digest, source_digest),
-             config,
-             :migration
-           ) do
-      config.backend.migrate(config, legacy_ref, stable_ref, legacy_checkpoint, write)
-    end
+    observe(:migrate, stable_ref, opts, %{byte_count: safe_byte_size(migrated_checkpoint)}, fn ->
+      with {:ok, config} <- Config.new(opts),
+           :ok <- backend_callback(config.backend, :migrate, 5),
+           {:ok, source_digest} <- source_digest(config, legacy_ref),
+           {:ok, _legacy_report} <-
+             Foundation.verify_instance_checkpoint(legacy_checkpoint, legacy_ref),
+           {:ok, report} <-
+             Foundation.verify_instance_checkpoint(migrated_checkpoint, stable_ref),
+           {:ok, write} <-
+             prepare(
+               stable_ref,
+               migrated_checkpoint,
+               0,
+               report.revision,
+               Keyword.put(opts, :source_entry_digest, source_digest),
+               config,
+               :migration
+             ) do
+        config.backend.migrate(config, legacy_ref, stable_ref, legacy_checkpoint, write)
+      end
+    end)
   end
 
   @doc false
@@ -82,8 +98,8 @@ defmodule Spectre.Ledger.CheckpointStore do
              is_integer(revision) and revision >= 0 and is_list(opts) and
              kind in [:checkpoint, :migration] do
     with :ok <- checkpoint_size(checkpoint, config.max_checkpoint_bytes),
-         :ok <- advancing_revision(expected, revision),
-         {:ok, report} <- Foundation.verify_instance_checkpoint(checkpoint),
+         :ok <- advancing_revision(kind, expected, revision),
+         {:ok, report} <- validate_instance_checkpoint(checkpoint, ref),
          :ok <- matching_revision(report.revision, revision),
          {:ok, owner_fencing_token} <-
            owner_fencing_token(Keyword.get(opts, :owner_fencing_token)),
@@ -129,13 +145,23 @@ defmodule Spectre.Ledger.CheckpointStore do
     end
   end
 
-  defp advancing_revision(expected, revision) when revision > expected, do: :ok
-  defp advancing_revision(_expected, _revision), do: {:error, :non_advancing_ledger_revision}
+  defp advancing_revision(:migration, 0, 0), do: :ok
+  defp advancing_revision(_kind, expected, revision) when revision > expected, do: :ok
+
+  defp advancing_revision(_kind, _expected, _revision),
+    do: {:error, :non_advancing_ledger_revision}
 
   defp matching_revision(revision, revision), do: :ok
 
   defp matching_revision(_checkpoint_revision, _argument_revision),
     do: {:error, :ledger_checkpoint_revision_mismatch}
+
+  defp validate_instance_checkpoint(checkpoint, ref) do
+    case Foundation.verify_instance_checkpoint(checkpoint, ref) do
+      {:ok, report} -> {:ok, report}
+      {:error, _reason} -> {:error, :invalid_ledger_instance_checkpoint}
+    end
+  end
 
   defp owner_fencing_token(nil), do: {:ok, nil}
 
@@ -169,4 +195,62 @@ defmodule Spectre.Ledger.CheckpointStore do
 
   defp sha256(bytes),
     do: bytes |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+
+  defp observe(operation, ref, opts, measurements, callback) do
+    started_at = System.monotonic_time()
+
+    try do
+      result = callback.()
+      emit(operation, ref, opts, measurements, result, started_at)
+      result
+    rescue
+      exception ->
+        emit(operation, ref, opts, measurements, {:error, exception}, started_at)
+        reraise exception, __STACKTRACE__
+    catch
+      kind, reason ->
+        emit(operation, ref, opts, measurements, {:error, {kind, reason}}, started_at)
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  defp emit(operation, ref, opts, measurements, result, started_at) do
+    measurements =
+      measurements
+      |> Map.put(:count, 1)
+      |> Map.put(
+        :duration_us,
+        System.convert_time_unit(System.monotonic_time() - started_at, :native, :microsecond)
+      )
+
+    metadata =
+      opts
+      |> backend_metadata()
+      |> Map.merge(Map.take(measurements, [:expected_revision, :revision]))
+      |> Map.merge(%{operation: operation, stream_key: ref.key})
+      |> outcome_metadata(result)
+
+    Telemetry.emit([:checkpoint, operation, :stop], measurements, metadata, opts)
+  end
+
+  defp outcome_metadata(metadata, {:ok, _value}), do: Map.put(metadata, :outcome, :ok)
+  defp outcome_metadata(metadata, :ok), do: Map.put(metadata, :outcome, :ok)
+  defp outcome_metadata(metadata, :not_found), do: Map.put(metadata, :outcome, :not_found)
+
+  defp outcome_metadata(metadata, {:error, reason}),
+    do: metadata |> Map.put(:outcome, :error) |> Map.put(:reason, reason)
+
+  defp outcome_metadata(metadata, _result), do: Map.put(metadata, :outcome, :invalid)
+
+  defp backend_metadata(opts) when is_list(opts) do
+    case Keyword.get(opts, :backend, :memory) do
+      backend when is_atom(backend) and not is_nil(backend) -> %{backend: backend}
+      _backend -> %{}
+    end
+  end
+
+  defp backend_metadata(_opts), do: %{}
+
+  defp safe_byte_size(value) when is_binary(value), do: byte_size(value)
+  defp safe_byte_size(_value), do: 0
 end

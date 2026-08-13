@@ -1,3 +1,40 @@
+defmodule SpectreLedger.ConformanceFaultBackend do
+  @behaviour Spectre.Ledger.Backend
+
+  alias Spectre.Ledger.Backend.Memory
+  alias Spectre.Ledger.Config
+
+  defdelegate load(config, ref), to: Memory
+  defdelegate compare_and_swap(config, write), to: Memory
+  defdelegate put_stream(config, stream_key, entries, objects), to: Memory
+
+  def head(config, stream_key) do
+    case {import_destination?(config), Config.get_backend(config, :fault),
+          Memory.head(config, stream_key)} do
+      {true, :head, {:ok, entry}} -> {:ok, %{entry | revision: entry.revision + 1}}
+      {_destination, _fault, result} -> result
+    end
+  end
+
+  def entries(config, stream_key, opts) do
+    if import_destination?(config) and Config.get_backend(config, :fault) == :entries,
+      do: {:ok, []},
+      else: Memory.entries(config, stream_key, opts)
+  end
+
+  def objects(config, stream_key, opts) do
+    if import_destination?(config) and Config.get_backend(config, :fault) == :objects,
+      do: {:ok, %{}},
+      else: Memory.objects(config, stream_key, opts)
+  end
+
+  defp import_destination?(config), do: String.contains?(config.namespace, ".conformance.")
+end
+
+defmodule SpectreLedger.IncompleteConformanceBackend do
+  def load(_config, _ref), do: :not_found
+end
+
 defmodule SpectreLedger.MemoryBackendTest do
   use ExUnit.Case, async: true
 
@@ -8,7 +45,9 @@ defmodule SpectreLedger.MemoryBackendTest do
   alias Spectre.Instance.CheckpointStore, as: CoreCheckpointStore
   alias Spectre.Instance.CheckpointStore.Conformance
   alias Spectre.Instance.Ref
+  alias Spectre.Ledger.Backend.Conformance, as: LedgerConformance
   alias Spectre.Ledger.Backend.Memory
+  alias Spectre.Ledger.Bundle
   alias Spectre.Ledger.Chain
   alias Spectre.Ledger.CheckpointStore
   alias Spectre.Ledger.Config
@@ -41,6 +80,50 @@ defmodule SpectreLedger.MemoryBackendTest do
                {CheckpointStore, opts},
                ref
              )
+  end
+
+  test "passes the public complete Ledger backend conformance" do
+    server = start_supervised!(Memory)
+    ref = isolated_ref("ledger-conformance")
+    opts = memory_opts(server, "ledger-conformance")
+
+    assert {:ok, report} = LedgerConformance.run(opts, ref)
+    assert report.contract_version == 1
+    assert report.entry_count == 3
+    assert report.head_revision == 3
+    assert report.import == :verified
+    assert report.checkpoint_store.concurrent_cas == :single_winner
+  end
+
+  test "Ledger conformance rejects incomplete backends and false import readbacks" do
+    server = start_supervised!(Memory)
+
+    assert {:error, {:ledger_backend_conformance_failed, :options, :invalid}} =
+             LedgerConformance.run([], :invalid)
+
+    assert {:error, {:ledger_backend_conformance_failed, :configuration, :backend_not_loaded}} =
+             LedgerConformance.run(
+               [backend: SpectreLedger.MissingConformanceBackend],
+               isolated_ref("missing-conformance")
+             )
+
+    assert {:error, {:ledger_backend_conformance_failed, :configuration, :callback_missing}} =
+             LedgerConformance.run(
+               [backend: SpectreLedger.IncompleteConformanceBackend],
+               isolated_ref("incomplete-conformance")
+             )
+
+    for fault <- [:head, :entries, :objects] do
+      opts = [
+        backend: SpectreLedger.ConformanceFaultBackend,
+        server: server,
+        namespace: "fault-#{fault}",
+        fault: fault
+      ]
+
+      assert {:error, {:ledger_backend_conformance_failed, :import, :failed}} =
+               LedgerConformance.run(opts, isolated_ref("fault-#{fault}"))
+    end
   end
 
   test "exact retries are idempotent, divergent same-revision writes conflict, and stale writes report the head" do
@@ -136,6 +219,15 @@ defmodule SpectreLedger.MemoryBackendTest do
                []
              )
 
+    assert {:ok, :aliased} =
+             CheckpointStore.migrate_instance_key(
+               legacy_ref,
+               stable_ref,
+               legacy,
+               migrated,
+               Keyword.put(opts, :owner_fencing_token, 99)
+             )
+
     assert {:ok, ^migrated} = CoreCheckpointStore.load(store, legacy_ref, [])
     assert {:ok, ^migrated} = CoreCheckpointStore.load(store, stable_ref, [])
 
@@ -162,6 +254,22 @@ defmodule SpectreLedger.MemoryBackendTest do
                migrated,
                []
              )
+
+    next_ref = isolated_ref("next-stable")
+    next_checkpoint = checkpoint!(next_ref, 1, "next-stable")
+
+    assert {:error, :ledger_migration_source_has_aliases} =
+             CoreCheckpointStore.migrate_instance_key(
+               store,
+               stable_ref,
+               next_ref,
+               migrated,
+               next_checkpoint,
+               []
+             )
+
+    assert {:ok, ^migrated} = CoreCheckpointStore.load(store, legacy_ref, [])
+    assert :not_found = CoreCheckpointStore.load(store, next_ref, [])
   end
 
   test "put_stream validates complete content and is idempotent but never overwrites" do
@@ -185,6 +293,8 @@ defmodule SpectreLedger.MemoryBackendTest do
       Enum.at(entries, 1).blob_digest => fourth
     }
 
+    assert {:ok, ^blobs} = Memory.objects(source, ref.key, [])
+
     assert {:ok, :imported} = Memory.put_stream(destination, ref.key, entries, blobs)
     assert {:ok, :idempotent} = Memory.put_stream(destination, ref.key, entries, blobs)
     assert {:ok, ^fourth} = Memory.load(destination, ref)
@@ -206,6 +316,42 @@ defmodule SpectreLedger.MemoryBackendTest do
     assert {:ok, ^fourth} = Memory.load(destination, ref)
   end
 
+  test "public facade exports, verifies, and imports a stream without backend leakage" do
+    server = start_supervised!(Memory)
+    ref = isolated_ref("facade-bundle")
+    source_opts = memory_opts(server, "facade-source")
+    destination_opts = memory_opts(server, "facade-destination")
+    first = checkpoint!(ref, 1, "facade-first")
+    third = checkpoint!(ref, 3, "facade-third")
+
+    assert :ok = persist(source_opts, ref, first, 0, 1)
+    assert :ok = persist(source_opts, ref, third, 1, 3)
+
+    assert {:ok, head} = Spectre.Ledger.head(ref, source_opts)
+    assert head.revision == 3
+    assert {:ok, [_first, ^head]} = Spectre.Ledger.entries(ref.key, source_opts)
+
+    assert {:ok, %{entry_count: 2, head_revision: 3}} =
+             Spectre.Ledger.verify(ref, source_opts)
+
+    assert {:error, :partial_ledger_stream_not_verifiable} =
+             Spectre.Ledger.verify(ref, source_opts ++ [limit: 1])
+
+    assert {:ok, bundle} = Spectre.Ledger.export_bundle(ref, source_opts)
+    assert {:ok, report} = Bundle.verify(bundle)
+    assert report.head_revision == 3
+    assert report.entry_count == 2
+
+    assert {:ok, :imported, ^report} =
+             Spectre.Ledger.import_bundle(bundle, destination_opts)
+
+    assert {:ok, :idempotent, ^report} =
+             Spectre.Ledger.import_bundle(bundle, destination_opts)
+
+    assert {:ok, ^third} =
+             CoreCheckpointStore.load({CheckpointStore, destination_opts}, ref, [])
+  end
+
   test "requires a live caller-supplied server" do
     ref = isolated_ref("configuration")
     checkpoint = checkpoint!(ref, 1, "configuration")
@@ -215,6 +361,159 @@ defmodule SpectreLedger.MemoryBackendTest do
 
     assert {:error, :memory_server_required} =
              Memory.compare_and_swap(config, prepare!(config, ref, checkpoint, 0, 1))
+  end
+
+  test "rejects malformed backend calls and keeps empty streams observational" do
+    server = start_supervised!(Memory)
+    ref = isolated_ref("invalid-calls")
+    config = config!(memory_opts(server, "invalid-calls"))
+
+    assert {:error, {:invalid_memory_backend_options, [:name]}} = Memory.start_link(name: :named)
+    assert {:error, :invalid_memory_backend_options} = Memory.start_link([:not_keyword])
+    assert {:error, :invalid_memory_backend_options} = Memory.start_link(:invalid)
+
+    assert :not_found = Memory.load(config, ref)
+    assert :not_found = Memory.head(config, ref.key)
+    assert {:ok, []} = Memory.entries(config, ref.key, [])
+    assert {:ok, %{}} = Memory.objects(config, ref.key, [])
+
+    assert {:error, :invalid_ledger_stream_key} = Memory.head(config, "")
+    assert {:error, :invalid_ledger_entry_query} = Memory.entries(config, ref.key, :invalid)
+
+    assert {:error, :invalid_ledger_after_revision} =
+             Memory.entries(config, ref.key, after_revision: -2)
+
+    assert {:error, :invalid_ledger_entry_limit} = Memory.entries(config, ref.key, limit: 0)
+    assert {:error, :invalid_ledger_object_query} = Memory.objects(config, ref.key, limit: 1)
+    assert {:error, :invalid_ledger_object_query} = Memory.objects(config, ref.key, :invalid)
+
+    invalid_ref = %{ref | key: ""}
+    assert {:error, :invalid_ledger_stream_key} = Memory.load(config, invalid_ref)
+
+    dead_server = spawn(fn -> :ok end)
+    monitor = Process.monitor(dead_server)
+    assert_receive {:DOWN, ^monitor, :process, ^dead_server, :normal}
+
+    assert {:error, :invalid_memory_server} =
+             Memory.load(config!(memory_opts(dead_server, "dead-server")), ref)
+
+    assert {:error, :invalid_memory_timeout} =
+             Memory.load(config!(memory_opts(server, "bad-timeout") ++ [timeout: 0]), ref)
+
+    assert :not_found =
+             Memory.load(
+               config!(memory_opts(server, "infinite-timeout") ++ [timeout: :infinity]),
+               ref
+             )
+  end
+
+  test "checkpoint write preparation rejects invalid size, revision, fencing, and provenance" do
+    server = start_supervised!(Memory)
+    ref = isolated_ref("prepare-errors")
+    checkpoint = checkpoint!(ref, 1, "prepare-errors")
+    config = config!(memory_opts(server, "prepare-errors"))
+
+    assert {:error, :invalid_ledger_checkpoint_write} =
+             CheckpointStore.prepare(ref, :not_binary, 0, 1, [], config)
+
+    assert {:error, :empty_ledger_checkpoint} =
+             CheckpointStore.prepare(ref, "", 0, 1, [], config)
+
+    assert {:error, {:ledger_checkpoint_too_large, size, 1}} =
+             CheckpointStore.prepare(
+               ref,
+               checkpoint,
+               0,
+               1,
+               [],
+               config!(memory_opts(server, "small") ++ [max_checkpoint_bytes: 1])
+             )
+
+    assert size == byte_size(checkpoint)
+
+    assert {:error, :non_advancing_ledger_revision} =
+             CheckpointStore.prepare(ref, checkpoint, 1, 1, [], config)
+
+    assert {:error, :ledger_checkpoint_revision_mismatch} =
+             CheckpointStore.prepare(ref, checkpoint, 0, 2, [], config)
+
+    assert {:error, :invalid_owner_fencing_token} =
+             CheckpointStore.prepare(
+               ref,
+               checkpoint,
+               0,
+               1,
+               [owner_fencing_token: -1],
+               config
+             )
+
+    assert {:error, :invalid_source_entry_digest} =
+             CheckpointStore.prepare(
+               ref,
+               checkpoint,
+               0,
+               1,
+               [source_entry_digest: "not-a-digest"],
+               config
+             )
+
+    assert {:error, :invalid_source_entry_digest} =
+             CheckpointStore.prepare(
+               ref,
+               checkpoint,
+               0,
+               1,
+               [source_entry_digest: 123],
+               config
+             )
+
+    other_ref = isolated_ref("wrong-ref")
+
+    assert {:error, :invalid_ledger_instance_checkpoint} =
+             CheckpointStore.prepare(other_ref, checkpoint, 0, 1, [], config)
+
+    assert {:error, {:ledger_backend_not_loaded, SpectreLedger.MissingBackend}} =
+             CheckpointStore.load(ref, backend: SpectreLedger.MissingBackend)
+  end
+
+  test "checkpoint boundary telemetry is numeric and redacts the stream and failure" do
+    server = start_supervised!(Memory)
+    ref = isolated_ref("telemetry-private-stream")
+    caller = self()
+
+    handler = fn event, measurements, metadata ->
+      send(caller, {:ledger_telemetry, event, measurements, metadata})
+    end
+
+    opts =
+      memory_opts(server, "telemetry")
+      |> Keyword.put(:telemetry_handler, handler)
+
+    checkpoint = checkpoint!(ref, 1, "telemetry-private-checkpoint")
+    assert :ok = persist(opts, ref, checkpoint, 0, 1)
+
+    assert_received {:ledger_telemetry,
+                     [:spectre, :ledger, :checkpoint, :compare_and_swap, :stop], measurements,
+                     %{
+                       backend: ":memory",
+                       expected_revision: 0,
+                       revision: 1,
+                       outcome: :ok,
+                       stream_id: stream_id
+                     } = metadata}
+
+    assert is_binary(stream_id)
+    assert Enum.all?(measurements, fn {_key, value} -> is_number(value) end)
+    refute inspect(metadata) =~ ref.key
+    refute inspect(metadata) =~ checkpoint
+
+    assert {:ok, ^checkpoint} =
+             CoreCheckpointStore.load({CheckpointStore, opts}, ref, [])
+
+    assert_received {:ledger_telemetry, [:spectre, :ledger, :checkpoint, :load, :stop],
+                     load_measurements, %{outcome: :ok, stream_id: ^stream_id}}
+
+    assert Enum.all?(load_measurements, fn {_key, value} -> is_number(value) end)
   end
 
   defp persist(opts, ref, checkpoint, expected, revision) do
