@@ -38,6 +38,8 @@ application's compiled BEAM surface.
   - functions: `schema_version/0`, `up_sql/0`, `up_sql/1`, `down_sql/0`, `down_sql/1`
 - `Spectre.Ledger.Bundle`
   - functions: `version/0`, `manifest/0`, `export/2`, `export/3`, `decode/1`, `decode/2`, `verify/1`, `verify/2`, `to_data/1`
+  - options: `telemetry: false | true` on `export/3`, `decode/2`, and `verify/2`;
+    `false` suppresses both custom-handler and standard `:telemetry` emission
 - `Spectre.Ledger.Chain`
   - functions: `verify/1`
 - `Spectre.Ledger.CheckpointStore`
@@ -60,8 +62,13 @@ application's compiled BEAM surface.
 Ledger archives only checkpoints that Spectre actually persists. Its public
 contract does not claim every runtime revision, deterministic execution replay,
 or exactly-once model and external side effects. Bundle v1 is a verified,
-bounded transport for persisted-checkpoint playback; it does not restore or
-execute `Spectre.Run` values.
+bounded transport for persisted-checkpoint playback. `Bundle.verify/2` does not
+call `Spectre.Run.restore/1`, start an Instance, activate an Agent, or replay
+model, action, or effect execution. Its Foundation-backed canonical decoding
+may nevertheless load an existing module named by the checkpoint, including
+module `@on_load` behavior. Verification is therefore supported directly only
+for trusted/local artifacts; externally supplied artifacts require an isolated,
+restricted node and a pre-vetted module set.
 
 The public backend conformance runner is ExUnit-independent and is the common
 contract suite for third-party backends. It extends Spectre's existing

@@ -51,7 +51,17 @@ and raw adapter errors.
 
 - retain bundles as sensitive application-state backups;
 - set limits lower than the defaults when deployment constraints permit;
-- call `Bundle.verify/2` before import;
+- call `Bundle.verify/2` before import, but only directly for trusted/local
+  artifacts;
+- verify externally supplied or otherwise untrusted bundles on an isolated,
+  disposable node or container with a restricted code path, least privilege,
+  no production credentials, and a pre-vetted/allowlisted module set;
+- remember that Foundation canonical decoding may load checkpoint-named BEAM
+  modules and run `@on_load`; Bundle v1 has no strong pre-decode module
+  allowlist;
 - authorize the stream and source independently of checksum validity;
 - keep the original bytes for audit if verification or import fails;
+- distinguish module loading during validation from runtime replay:
+  `Bundle.verify/2` does not call `Spectre.Run.restore/1`, start an Instance,
+  activate an Agent, or replay model, action, or effect execution;
 - never present Bundle v1 as deterministic replay or an every-transition log.

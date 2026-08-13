@@ -19,6 +19,10 @@ defmodule Spectre.Ledger.Telemetry do
   Backends may use the same boundary for append and load observations.
   Telemetry remains observational because `Spectre.Telemetry` contains handler
   failures and never changes the operation result.
+
+  Passing `telemetry: false` suppresses both the custom handler and the
+  standard `:telemetry` sink. Omitting the option, or passing `true`, preserves
+  normal emission.
   """
 
   alias Spectre.Canonical.Value
@@ -40,21 +44,29 @@ defmodule Spectre.Ledger.Telemetry do
 
   def emit(event, measurements, metadata, opts)
       when is_map(measurements) and is_map(metadata) and is_list(opts) do
-    case event_path(event) do
-      {:ok, path} ->
-        Spectre.Telemetry.emit(
-          [:ledger | path],
-          safe_measurements(measurements),
-          safe_metadata(metadata),
-          telemetry_options(opts)
-        )
+    if telemetry_disabled?(opts) do
+      :ok
+    else
+      case event_path(event) do
+        {:ok, path} ->
+          Spectre.Telemetry.emit(
+            [:ledger | path],
+            safe_measurements(measurements),
+            safe_metadata(metadata),
+            telemetry_options(opts)
+          )
 
-      :error ->
-        :ok
+        :error ->
+          :ok
+      end
     end
   end
 
   def emit(_event, _measurements, _metadata, _opts), do: :ok
+
+  defp telemetry_disabled?(opts) do
+    Keyword.keyword?(opts) and Keyword.get(opts, :telemetry, true) == false
+  end
 
   @doc "Returns a stable digest for an identifier without exposing its value."
   @spec id_digest(term()) :: String.t()

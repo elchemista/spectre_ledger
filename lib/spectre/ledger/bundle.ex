@@ -6,10 +6,17 @@ defmodule Spectre.Ledger.Bundle do
   each entry's `blob_digest`. Verification checks the envelope checksum, entry
   chain, raw byte digests, and Spectre Foundation checkpoint digests.
 
-  Bundle verification deliberately treats the canonical checkpoint's `runs`
-  section as opaque data. It never restores a `Spectre.Run` or executes code.
-  The manifest is consequently explicit that the artifact supports checkpoint
-  playback, not every-revision capture or deterministic execution replay.
+  Verification delegates checkpoint validation to
+  `Spectre.Foundation.Conformance`. Foundation decodes canonical values, and
+  `Spectre.Run.Value.prepare/1` may load an existing BEAM module named by a
+  checkpoint; normal module loading can run that module's `@on_load` callback.
+  `verify/2` is therefore a trusted/local-artifact operation, not a sandbox for
+  untrusted bundles.
+
+  Verification does not call `Spectre.Run.restore/1`, start an Instance,
+  activate an Agent, or replay model, action, or effect execution. The manifest
+  is consequently explicit that the artifact supports checkpoint playback,
+  not every-revision capture or deterministic execution replay.
   """
 
   alias Spectre.Foundation.Conformance, as: Foundation
@@ -45,7 +52,7 @@ defmodule Spectre.Ledger.Bundle do
     :max_total_object_bytes,
     :max_depth
   ]
-  @option_keys [:telemetry_handler | @limit_keys]
+  @option_keys [:telemetry, :telemetry_handler | @limit_keys]
 
   @enforce_keys [:format, :bundle_version, :manifest, :entries, :objects, :checksum]
   defstruct @enforce_keys
@@ -86,6 +93,9 @@ defmodule Spectre.Ledger.Bundle do
 
   `objects` must be an exact map from every entry `blob_digest` to the raw
   checkpoint bytes. Extra or missing objects are rejected.
+
+  Pass `telemetry: false` to suppress both the optional custom handler and the
+  standard `:telemetry` event for this operation. The default is `true`.
   """
   @spec export([Entry.t()], %{String.t() => binary()}, keyword()) ::
           {:ok, binary()} | {:error, term()}
@@ -113,6 +123,8 @@ defmodule Spectre.Ledger.Bundle do
 
   This checks the closed envelope and content-addressed object encoding. Call
   `verify/2` to additionally verify the Ledger chain and Spectre checkpoints.
+  `telemetry: false | true` is accepted so callers can share the same closed
+  Bundle options across decode and verification; decode itself emits no event.
   """
   @spec decode(binary(), keyword()) :: {:ok, t()} | {:error, term()}
   def decode(encoded, opts \\ []) do
@@ -122,7 +134,19 @@ defmodule Spectre.Ledger.Bundle do
   end
 
   @doc """
-  Verifies a JSON bundle or decoded bundle without restoring executable Runs.
+  Verifies a JSON bundle or decoded bundle as a trusted/local artifact.
+
+  This calls the Spectre Foundation verifier. Decoding canonical values may
+  load existing modules named by the checkpoint and can therefore trigger
+  module-load behavior such as `@on_load`. Do not use this function as an
+  untrusted-input sandbox. Verify externally supplied bundles on an isolated
+  node with a restricted, pre-vetted code path and module set.
+
+  This function does not call `Spectre.Run.restore/1`, start an Instance,
+  activate an Agent, or replay model, action, or effect execution.
+
+  Pass `telemetry: false` to suppress both the optional custom handler and the
+  standard `:telemetry` event for this operation. The default is `true`.
   """
   @spec verify(binary() | t(), keyword()) ::
           {:ok, verification_report()} | {:error, term()}
@@ -462,7 +486,7 @@ defmodule Spectre.Ledger.Bundle do
           {:error, :unknown_ledger_bundle_options}
 
         true ->
-          build_limits(opts)
+          validated_limits(opts)
       end
     else
       {:error, :invalid_ledger_bundle_options}
@@ -470,6 +494,22 @@ defmodule Spectre.Ledger.Bundle do
   end
 
   defp limits(_opts), do: {:error, :invalid_ledger_bundle_options}
+
+  @spec validated_limits(keyword()) :: {:ok, map()} | {:error, term()}
+  defp validated_limits(opts) do
+    with :ok <- telemetry_option(opts) do
+      build_limits(opts)
+    end
+  end
+
+  @spec telemetry_option(keyword()) :: :ok | {:error, term()}
+  defp telemetry_option(opts) do
+    case Keyword.fetch(opts, :telemetry) do
+      :error -> :ok
+      {:ok, value} when is_boolean(value) -> :ok
+      {:ok, _value} -> {:error, {:invalid_ledger_bundle_option, :telemetry}}
+    end
+  end
 
   @spec build_limits(keyword()) :: {:ok, map()} | {:error, term()}
   defp build_limits(opts) do

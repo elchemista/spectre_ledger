@@ -20,7 +20,23 @@ Bundle verification:
 - rejects duplicate JSON keys, unknown envelope fields, non-canonical base64,
   incomplete object sets, broken entry chains, and digest mismatches;
 - validates checkpoints through `Spectre.Foundation.Conformance`;
-- does not restore or execute `Spectre.Run` values embedded in checkpoints.
+- does not call `Spectre.Run.restore/1`, start an Instance, activate an Agent,
+  or replay model, action, or effect execution.
+
+Foundation validation is not a no-code or untrusted-input sandbox. It decodes
+canonical checkpoint values, and `Spectre.Run.Value.prepare/1` may call
+`Code.ensure_loaded?/1` for an existing BEAM module named by the checkpoint.
+Loading such a module can run its `@on_load` callback. The size, shape, checksum,
+and digest checks above establish boundedness and integrity; they do not remove
+this code-loading trust boundary.
+
+Use `Bundle.verify/2` and bundle import directly only for trusted/local
+artifacts whose producing application and module set are trusted. For an
+externally supplied or otherwise untrusted bundle, perform verification in an
+isolated, disposable node or container with a restricted code path, least
+privilege, no production credentials, and a pre-vetted/allowlisted module set.
+Bundle v1 does not provide a strong pre-decode module allowlist, so do not
+verify such artifacts in a privileged application node.
 
 Verification does not authorize a bundle for a particular Agent or deployment.
 Hosts must apply their own manifest and policy allowlists before playback or

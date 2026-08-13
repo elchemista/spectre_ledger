@@ -6,6 +6,21 @@ defmodule SpectreLedger.HexReleaseContractTest do
   @spectre_requirement "~> 0.3.1"
   @documentation_files ["README.md", "CHANGELOG.md", "SECURITY.md"] ++
                          Path.wildcard("docs/*.md", match_dot: true)
+  @bundle_security_files [
+    "README.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "docs/ARCHITECTURE.md",
+    "docs/OPERATIONS.md",
+    "docs/PUBLIC_API.md",
+    "lib/spectre/ledger/bundle.ex"
+  ]
+  @obsolete_bundle_claims [
+    "It never restores a `Spectre.Run` or executes code.",
+    "It never restores executable `Spectre.Run` values.",
+    "does not restore or execute `Spectre.Run` values",
+    "Verification proceeds without executing checkpoint contents"
+  ]
 
   test "Mix and Hex metadata describe the 0.1.0 release for Spectre 0.3.1" do
     config = Mix.Project.config()
@@ -54,6 +69,36 @@ defmodule SpectreLedger.HexReleaseContractTest do
         local_target?(target) do
       assert_local_target!(relative_file, target)
     end
+  end
+
+  test "published Bundle API documents module loading and preserves the no-replay boundary" do
+    {:docs_v1, _annotation, :elixir, "text/markdown", module_doc, _metadata, docs} =
+      Code.fetch_docs(Spectre.Ledger.Bundle)
+
+    verify_doc =
+      Enum.find_value(docs, fn
+        {{:function, :verify, 2}, _annotation, _signatures, doc, _metadata} -> doc
+        _other -> nil
+      end)
+
+    module_text = english_doc!(module_doc)
+    verify_text = english_doc!(verify_doc)
+    combined = module_text <> "\n" <> verify_text
+
+    for marker <- [
+          "Spectre.Run.Value.prepare/1",
+          "existing BEAM module",
+          "@on_load",
+          "trusted/local-artifact",
+          "not a sandbox",
+          "Spectre.Run.restore/1",
+          "does not call",
+          "replay model, action, or effect execution"
+        ] do
+      assert combined =~ marker
+    end
+
+    refute_obsolete_bundle_claims!(combined)
   end
 
   @tag timeout: 30_000
@@ -110,6 +155,13 @@ defmodule SpectreLedger.HexReleaseContractTest do
     assert "docs/PUBLIC_API.md" in files
     assert "lib/spectre/ledger/backend/conformance.ex" in files
     assert "priv/templates/spectre_ledger.gen.migration/migration.exs.eex" in files
+
+    for relative_file <- @bundle_security_files do
+      assert relative_file in files
+    end
+
+    assert_packaged_bundle_security_boundary!(unpack_dir)
+
     refute Enum.any?(files, &String.starts_with?(&1, "test"))
     refute "mix.lock" in files
   end
@@ -151,6 +203,50 @@ defmodule SpectreLedger.HexReleaseContractTest do
   defp decode_metadata(value) when is_list(value), do: Enum.map(value, &decode_metadata/1)
   defp decode_metadata({key, value}), do: {decode_metadata(key), decode_metadata(value)}
   defp decode_metadata(value), do: value
+
+  defp english_doc!(%{"en" => text}) when is_binary(text), do: text
+
+  defp assert_packaged_bundle_security_boundary!(unpack_dir) do
+    security = unpack_dir |> Path.join("SECURITY.md") |> File.read!() |> normalize_whitespace()
+
+    bundle_source =
+      unpack_dir
+      |> Path.join("lib/spectre/ledger/bundle.ex")
+      |> File.read!()
+      |> normalize_whitespace()
+
+    published_contract =
+      Enum.map_join(@bundle_security_files, "\n", &read_package!(unpack_dir, &1))
+
+    for marker <- [
+          "Spectre.Run.Value.prepare/1",
+          "Code.ensure_loaded?/1",
+          "@on_load",
+          "trusted/local",
+          "isolated",
+          "pre-vetted/allowlisted module set",
+          "strong pre-decode module allowlist"
+        ] do
+      assert security =~ marker
+    end
+
+    assert bundle_source =~ "does not call `Spectre.Run.restore/1`"
+    assert bundle_source =~ "not a sandbox for untrusted bundles"
+    refute_obsolete_bundle_claims!(published_contract)
+  end
+
+  defp read_package!(unpack_dir, relative_file),
+    do: File.read!(Path.join(unpack_dir, relative_file))
+
+  defp refute_obsolete_bundle_claims!(text) do
+    normalized = normalize_whitespace(text)
+
+    for claim <- @obsolete_bundle_claims do
+      refute normalized =~ normalize_whitespace(claim)
+    end
+  end
+
+  defp normalize_whitespace(text), do: String.replace(text, ~r/\s+/u, " ")
 
   defp markdown_targets(relative_file) do
     relative_file

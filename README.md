@@ -91,7 +91,15 @@ The v1 manifest permanently says:
 Verification is bounded by encoded-size, entry-count, object-count,
 per-object, total-object, and nesting-depth limits. It validates the global
 checksum, Ledger entry chain, raw object digests, and Spectre Foundation
-checkpoint digests. It never restores executable `Spectre.Run` values.
+checkpoint digests. Foundation decodes canonical values during this last step;
+`Spectre.Run.Value.prepare/1` may load an existing BEAM module named by the
+checkpoint, and normal module loading can run that module's `@on_load`
+callback. Treat `Bundle.verify/2` as a trusted/local-artifact operation. Verify
+externally supplied artifacts only on an isolated node with a restricted,
+pre-vetted code path and module set.
+
+Bundle verification does not call `Spectre.Run.restore/1`, start an Instance,
+activate an Agent, or replay model, action, or effect execution.
 
 ## Doctor and telemetry
 
@@ -109,13 +117,18 @@ probe. It never starts resources or writes storage.
 
 Ledger telemetry is emitted under `[:spectre, :ledger, ...]`. Measurements are
 numeric and metadata is redacted: raw stream keys, checkpoints, credentials,
-Repo configuration, and raw errors are not emitted.
+Repo configuration, and raw errors are not emitted. Bundle `export/3`,
+`decode/2`, and `verify/2` accept the closed boolean option `telemetry: false`
+when an offline consumer must suppress both custom and standard telemetry;
+the default is `true`.
 
 ## Security
 
 Treat bundles and database checkpoints as potentially sensitive application
-state even though identifiers are content-addressed. Apply the limits before
-accepting untrusted bundles and verify every bundle before import. See
+state even though identifiers are content-addressed. Size and shape limits do
+not make Foundation-backed verification safe for untrusted input. Keep normal
+verification to trusted/local artifacts; use an isolated, restricted node for
+externally supplied bundles, and verify every bundle before import. See
 [SECURITY.md](SECURITY.md).
 
 ## License

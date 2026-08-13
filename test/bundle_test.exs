@@ -1,5 +1,13 @@
+defmodule SpectreLedger.BundleTelemetryHandler do
+  @moduledoc false
+
+  def forward(event, measurements, metadata, pid) do
+    send(pid, {:standard_telemetry, event, measurements, metadata})
+  end
+end
+
 defmodule SpectreLedger.BundleTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Spectre.AgentRef
   alias Spectre.Foundation.Conformance, as: Foundation
@@ -166,6 +174,7 @@ defmodule SpectreLedger.BundleTest do
 
   test "rejects invalid options and duplicate JSON keys without creating atoms" do
     {entries, objects} = fixture(1)
+    {:ok, encoded} = Bundle.export(entries, objects)
 
     assert {:error, {:invalid_ledger_bundle_limit, :max_entries}} =
              Bundle.export(entries, objects, max_entries: 0)
@@ -175,6 +184,18 @@ defmodule SpectreLedger.BundleTest do
 
     assert {:error, :duplicate_ledger_bundle_options} =
              Bundle.export(entries, objects, max_entries: 1, max_entries: 2)
+
+    assert {:error, :duplicate_ledger_bundle_options} =
+             Bundle.export(entries, objects, telemetry: false, telemetry: true)
+
+    assert {:error, {:invalid_ledger_bundle_option, :telemetry}} =
+             Bundle.export(entries, objects, telemetry: :disabled)
+
+    assert {:error, {:invalid_ledger_bundle_option, :telemetry}} =
+             Bundle.decode(encoded, telemetry: nil)
+
+    assert {:error, {:invalid_ledger_bundle_option, :telemetry}} =
+             Bundle.verify(encoded, telemetry: 0)
 
     assert {:error, :duplicate_ledger_bundle_json_key} =
              Bundle.decode(~s({"format":"spectre/ledger-bundle","format":"duplicate"}))
@@ -244,6 +265,60 @@ defmodule SpectreLedger.BundleTest do
                      %{operation: :verify, outcome: :error, reason_class: _class} = metadata}
 
     refute inspect(metadata) =~ "private checkpoint text"
+  end
+
+  test "telemetry false suppresses custom and standard sinks while true and default emit" do
+    {entries, objects} = fixture(1)
+    caller = self()
+
+    events = [
+      [:spectre, :ledger, :bundle, :export, :stop],
+      [:spectre, :ledger, :bundle, :verify, :stop]
+    ]
+
+    handler_id = {__MODULE__, make_ref()}
+
+    assert :ok =
+             :telemetry.attach_many(
+               handler_id,
+               events,
+               &SpectreLedger.BundleTelemetryHandler.forward/4,
+               caller
+             )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    custom_handler = fn event, measurements, metadata ->
+      send(caller, {:custom_telemetry, event, measurements, metadata})
+    end
+
+    assert {:ok, encoded} =
+             Bundle.export(entries, objects,
+               telemetry: false,
+               telemetry_handler: custom_handler
+             )
+
+    assert {:ok, _decoded} = Bundle.decode(encoded, telemetry: false)
+
+    assert {:ok, _report} =
+             Bundle.verify(encoded, telemetry: false, telemetry_handler: custom_handler)
+
+    refute_receive {:custom_telemetry, _event, _measurements, _metadata}, 50
+    refute_receive {:standard_telemetry, _event, _measurements, _metadata}, 50
+
+    assert {:ok, _encoded} =
+             Bundle.export(entries, objects,
+               telemetry: true,
+               telemetry_handler: custom_handler
+             )
+
+    assert_receive {:custom_telemetry, [:spectre, :ledger, :bundle, :export, :stop], _, _}
+    assert_receive {:standard_telemetry, [:spectre, :ledger, :bundle, :export, :stop], _, _}
+
+    assert {:ok, _report} = Bundle.verify(encoded, telemetry_handler: custom_handler)
+
+    assert_receive {:custom_telemetry, [:spectre, :ledger, :bundle, :verify, :stop], _, _}
+    assert_receive {:standard_telemetry, [:spectre, :ledger, :bundle, :verify, :stop], _, _}
   end
 
   test "does not call Spectre.Run.restore while verifying checkpoints" do
