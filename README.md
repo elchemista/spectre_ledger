@@ -21,6 +21,20 @@ def deps do
 end
 ```
 
+The PostgreSQL adapter is optional. Consumers that only verify or inspect
+bundles do not pull Ecto SQL or Postgrex transitively. Applications selecting
+the PostgreSQL backend must declare the database dependencies themselves:
+
+```elixir
+def deps do
+  [
+    {:spectre_ledger, "~> 0.1.0"},
+    {:ecto_sql, "~> 3.14"},
+    {:postgrex, "~> 0.22.4"}
+  ]
+end
+```
+
 During development against the adjacent Spectre checkout:
 
 ```console
@@ -43,9 +57,9 @@ store =
   )
 ```
 
-For production, use `backend: :postgres` with a host-owned, already running
-Ecto Repo. Ledger neither configures nor supervises that Repo. Generate and run
-the package migration first:
+For production, use `backend: :postgres` with those optional dependencies and
+a host-owned, already running Ecto Repo. Ledger neither configures nor
+supervises that Repo. Generate and run the package migration first:
 
 ```console
 mix spectre_ledger.gen.migration

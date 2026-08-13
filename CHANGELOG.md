@@ -10,6 +10,8 @@ Initial release for Spectre 0.3.1.
 
 - append-only `Spectre.Instance.CheckpointStore` adapter;
 - caller-owned Memory backend and host-owned PostgreSQL backend;
+- optional Ecto SQL and Postgrex dependencies, keeping bundle-only and Memory
+  consumers free of the PostgreSQL dependency stack;
 - atomic CAS, exact-retry reconciliation, coalesced revision support, migration
   aliases, and portable receipts;
 - content-addressed Entry v1 chains;

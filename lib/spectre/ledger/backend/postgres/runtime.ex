@@ -1,10 +1,10 @@
 defmodule Spectre.Ledger.Backend.Postgres.Runtime do
   @moduledoc false
 
-  alias Ecto.Adapters.SQL
   alias Spectre.Ledger.Backend.Postgres.Names
   alias Spectre.Ledger.Config
 
+  @ecto_sql :"Elixir.Ecto.Adapters.SQL"
   @rollback_tag {__MODULE__, :rollback}
 
   @enforce_keys [:repo, :names, :query_opts, :transaction_opts]
@@ -23,7 +23,8 @@ defmodule Spectre.Ledger.Backend.Postgres.Runtime do
     query_opts = Config.get_backend(config, :query_opts, log: false)
     transaction_opts = Config.get_backend(config, :transaction_opts, log: false)
 
-    with :ok <- validate_repo(repo),
+    with :ok <- validate_ecto_sql(),
+         :ok <- validate_repo(repo),
          :ok <- validate_options(:query_opts, query_opts),
          :ok <- validate_options(:transaction_opts, transaction_opts),
          {:ok, names} <- Names.from_config(config) do
@@ -37,9 +38,9 @@ defmodule Spectre.Ledger.Backend.Postgres.Runtime do
     end
   end
 
-  @spec read(t(), iodata(), list()) :: {:ok, SQL.query_result()} | {:error, term()}
+  @spec read(t(), iodata(), list()) :: {:ok, map()} | {:error, term()}
   def read(%__MODULE__{} = runtime, sql, params \\ []) do
-    SQL.query(runtime.repo, sql, params, runtime.query_opts)
+    sql_query(runtime, sql, params)
     |> case do
       {:ok, result} -> {:ok, result}
       {:error, exception} -> {:error, {:ledger_postgres_query, error_class(exception)}}
@@ -50,9 +51,9 @@ defmodule Spectre.Ledger.Backend.Postgres.Runtime do
     kind, _reason -> {:error, {:ledger_postgres_query, kind}}
   end
 
-  @spec query!(t(), iodata(), list()) :: SQL.query_result() | no_return()
+  @spec query!(t(), iodata(), list()) :: map() | no_return()
   def query!(%__MODULE__{} = runtime, sql, params \\ []) do
-    case SQL.query(runtime.repo, sql, params, runtime.query_opts) do
+    case sql_query(runtime, sql, params) do
       {:ok, result} -> result
       {:error, exception} -> rollback(runtime, {:ledger_postgres_query, error_class(exception)})
     end
@@ -97,6 +98,14 @@ defmodule Spectre.Ledger.Backend.Postgres.Runtime do
 
   defp validate_repo(_repo), do: {:error, :invalid_ledger_postgres_repo}
 
+  defp validate_ecto_sql do
+    if Code.ensure_loaded?(@ecto_sql) and function_exported?(@ecto_sql, :query, 4) do
+      :ok
+    else
+      {:error, {:ledger_postgres_dependency_unavailable, :ecto_sql}}
+    end
+  end
+
   defp validate_options(_kind, value) when is_list(value) do
     if Keyword.keyword?(value), do: :ok, else: {:error, :invalid_ledger_postgres_options}
   end
@@ -109,6 +118,11 @@ defmodule Spectre.Ledger.Backend.Postgres.Runtime do
       %{rows: [[_other]]} -> rollback(runtime, :ledger_postgres_requires_read_committed)
       _result -> rollback(runtime, :invalid_ledger_postgres_isolation_result)
     end
+  end
+
+  defp sql_query(runtime, sql, params) do
+    query = Function.capture(@ecto_sql, :query, 4)
+    query.(runtime.repo, sql, params, runtime.query_opts)
   end
 
   defp error_class(%{__struct__: module}) when is_atom(module), do: module

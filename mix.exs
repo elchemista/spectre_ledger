@@ -31,8 +31,8 @@ defmodule SpectreLedger.MixProject do
     [
       spectre_dep(),
       {:jason, "~> 1.4"},
-      {:ecto_sql, "~> 3.14"},
-      {:postgrex, "~> 0.22.4"},
+      {:ecto_sql, "~> 3.14", optional: true},
+      {:postgrex, "~> 0.22.4", optional: true},
       {:ex_doc, "~> 0.40.3", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

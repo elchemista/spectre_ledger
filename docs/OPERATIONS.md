@@ -16,6 +16,11 @@ non-zero command result.
 
 ## PostgreSQL lifecycle
 
+Declare `ecto_sql ~> 3.14` and `postgrex ~> 0.22.4` in the host application.
+They are optional Ledger dependencies so offline bundle consumers do not carry
+a database stack. Selecting the PostgreSQL backend without Ecto SQL installed
+fails closed with `{:ledger_postgres_dependency_unavailable, :ecto_sql}`.
+
 The host starts and supervises its Ecto Repo. Generate the Ledger migration,
 review it, apply it through the host's normal deployment process, and only then
 configure the checkpoint store. Keep schema and table-prefix options identical

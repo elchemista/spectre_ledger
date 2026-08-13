@@ -30,6 +30,13 @@ defmodule SpectreLedger.HexReleaseContractTest do
 
     assert ex_doc_opts[:only] == :dev
     assert ex_doc_opts[:runtime] == false
+
+    for dependency <- [:ecto_sql, :postgrex] do
+      assert {^dependency, _requirement, opts} =
+               Enum.find(config[:deps], &match?({^dependency, _, _}, &1))
+
+      assert opts[:optional] == true
+    end
   end
 
   test "all Markdown guides are in ExDoc and every local link resolves" do
@@ -85,14 +92,18 @@ defmodule SpectreLedger.HexReleaseContractTest do
       metadata
       |> metadata_value("requirements")
       |> Map.new(fn requirement ->
-        {metadata_value(requirement, "name"), metadata_value(requirement, "requirement")}
+        {metadata_value(requirement, "name"),
+         %{
+           requirement: metadata_value(requirement, "requirement"),
+           optional: metadata_value(requirement, "optional")
+         }}
       end)
 
     assert requirements == %{
-             "ecto_sql" => "~> 3.14",
-             "jason" => "~> 1.4",
-             "postgrex" => "~> 0.22.4",
-             "spectre" => @spectre_requirement
+             "ecto_sql" => %{requirement: "~> 3.14", optional: true},
+             "jason" => %{requirement: "~> 1.4", optional: nil},
+             "postgrex" => %{requirement: "~> 0.22.4", optional: true},
+             "spectre" => %{requirement: @spectre_requirement, optional: nil}
            }
 
     files = metadata_value(metadata, "files")

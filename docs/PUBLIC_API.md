@@ -14,7 +14,8 @@ Backend callback implementations remain callable through the
 `Spectre.Ledger.Backend` behaviour; listing a backend module here does not turn
 its OTP callbacks or internal helpers into an additional API. The Memory
 backend is caller-owned and volatile. The PostgreSQL backend uses a host-owned
-Repo.
+Repo and requires the host to declare Ledger's optional `ecto_sql` and
+`postgrex` dependencies.
 
 `test/public_api_manifest_test.exs` parses this manifest after a clean compile
 and verifies every declared module, function, macro, and callback against the

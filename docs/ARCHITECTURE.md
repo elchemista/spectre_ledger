@@ -14,6 +14,11 @@ to Spectre core.
 - Lab may consume verified bundles offline; Ledger does not decode executable
   Runs for it.
 
+Ecto SQL and Postgrex are optional package dependencies. Bundle, chain,
+checkpoint conformance, and Memory consumers do not fetch them transitively.
+The host opts into the PostgreSQL backend by declaring both dependencies and
+continues to own its Repo.
+
 ## Entry chain
 
 Each Entry v1 identifies one successful persisted checkpoint by:
