@@ -1,0 +1,11 @@
+defmodule <%= @migration_module %> do
+  use Ecto.Migration
+
+  def up do
+<%= for statement <- @up_sql do %>    execute(<%= inspect(statement) %>)
+<% end %>  end
+
+  def down do
+<%= for statement <- @down_sql do %>    execute(<%= inspect(statement) %>)
+<% end %>  end
+end
