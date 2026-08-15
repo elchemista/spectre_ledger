@@ -33,18 +33,18 @@ defmodule SpectreLedger.PackageContractTest do
   alias Spectre.Stack.Installable
   alias Spectre.Subject
 
-  test "package manifest conforms against Spectre 0.3.1" do
+  test "package manifest conforms against Spectre 0.3.2" do
     assert {:ok, package} = Installable.verify(Spectre.Ledger)
     assert package.id == :spectre_ledger
     assert package.version == "0.1.0"
-    assert package.spectre == "~> 0.3.1"
+    assert package.spectre == "~> 0.3.2"
     assert package.agent_extensions == []
     assert package.operations == []
     assert package.actions == []
     assert package.resources == []
 
     assert {:ok, report} = StackConformance.run([Spectre.Ledger])
-    assert report.core_version == "0.3.1"
+    assert report.core_version == "0.3.2"
     assert report.package_count == 1
   end
 
@@ -71,6 +71,8 @@ defmodule SpectreLedger.PackageContractTest do
     assert Spectre.Ledger.version() == "0.1.0"
     assert Spectre.Ledger.checkpoint_store() == {CheckpointStore, []}
     assert Spectre.Ledger.checkpoint_store(source) == {CheckpointStore, source}
+    assert Spectre.Ledger.receipt_sink() == {Spectre.Ledger.ReceiptSink, []}
+    assert Spectre.Ledger.receipt_sink(source) == {Spectre.Ledger.ReceiptSink, source}
 
     assert {:ok, %{revision: 3}} =
              CheckpointConformance.run({CheckpointStore, source}, ref)
@@ -181,6 +183,7 @@ defmodule SpectreLedger.PackageContractTest do
     assert memory.backend == Memory
     assert memory.namespace == "default"
     assert memory.max_checkpoint_bytes == 8_000_000
+    assert memory.max_receipt_bytes == 8_000_000
     assert Config.fetch_backend(memory, :server) == {:ok, handle}
     assert Config.fetch_backend(memory, :missing) == :error
     assert Config.get_backend(memory, :server) == handle
@@ -223,7 +226,8 @@ defmodule SpectreLedger.PackageContractTest do
       backend: Memory,
       backend_opts: [],
       namespace: "valid",
-      max_checkpoint_bytes: 1
+      max_checkpoint_bytes: 1,
+      max_receipt_bytes: 1
     }
 
     assert {:error, :invalid_ledger_backend} = Config.new(%{valid | backend: nil})

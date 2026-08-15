@@ -27,6 +27,8 @@ defmodule SpectreLedger.PostgresGeneratorTest do
       source = File.read!(path)
       assert source =~ "defmodule CreateSpectreLedger20260813010203"
       assert source =~ ~s(\\\"audit\\\".\\\"spectre_history_entries\\\")
+      assert source =~ ~s(\\\"audit\\\".\\\"spectre_history_receipt_entries\\\")
+      assert source =~ "inference_attempt_terminal"
       refute source =~ "Spectre.Ledger.Backend"
       assert {:ok, _ast} = Code.string_to_quoted(source)
 

@@ -84,8 +84,8 @@ defmodule SpectreLedger.TelemetryTest do
                %{
                  bundle_version: 1,
                  head_revision: 2,
-                 schema_version: 1,
-                 table_count: 5,
+                 schema_version: 2,
+                 table_count: 8,
                  reason_class: :unavailable
                },
                telemetry_handler: fn event, measurements, metadata ->
@@ -97,8 +97,8 @@ defmodule SpectreLedger.TelemetryTest do
                      %{
                        bundle_version: 1,
                        head_revision: 2,
-                       schema_version: 1,
-                       table_count: 5,
+                       schema_version: 2,
+                       table_count: 8,
                        reason_class: :unavailable
                      }}
 

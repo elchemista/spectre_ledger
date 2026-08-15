@@ -21,7 +21,12 @@ defmodule Spectre.Ledger.Backend.Memory do
   alias Spectre.Ledger.Config
   alias Spectre.Ledger.Entry
   alias Spectre.Ledger.Receipt
+  alias Spectre.Ledger.ReceiptCodec
+  alias Spectre.Ledger.ReceiptEntry
+  alias Spectre.Ledger.ReceiptWrite
   alias Spectre.Ledger.Write
+  alias Spectre.Receipt.Envelope
+  alias Spectre.Receipt.Sink
 
   @default_timeout 5_000
 
@@ -33,7 +38,16 @@ defmodule Spectre.Ledger.Backend.Memory do
 
   @type namespace :: %{
           streams: %{optional(String.t()) => stream()},
-          aliases: %{optional(String.t()) => String.t()}
+          aliases: %{optional(String.t()) => String.t()},
+          receipt_streams: %{optional(String.t()) => [ReceiptEntry.t()]},
+          receipt_index: %{optional(String.t()) => ReceiptEntry.t()},
+          receipt_payloads: %{
+            optional(String.t()) => %{
+              envelope_digest: String.t(),
+              encoded: binary(),
+              byte_size: pos_integer()
+            }
+          }
         }
 
   @type state :: %{optional(String.t()) => namespace()}
@@ -122,6 +136,71 @@ defmodule Spectre.Ledger.Backend.Memory do
     with {:ok, stream} <- imported_stream(config, stream_key, entries, blobs),
          {:ok, server, timeout} <- server(config) do
       GenServer.call(server, {:put_stream, config.namespace, stream_key, stream}, timeout)
+    end
+  end
+
+  @impl Spectre.Ledger.Backend
+  def append_receipt(%Config{} = config, %ReceiptWrite{} = write) do
+    with :ok <- ReceiptWrite.validate(write, config),
+         {:ok, server, timeout} <- server(config) do
+      GenServer.call(server, {:append_receipt, config.namespace, write}, timeout)
+    end
+  end
+
+  @impl Spectre.Ledger.Backend
+  def lookup_receipt(%Config{} = config, id) when is_binary(id) and id != "" do
+    with {:ok, server, timeout} <- server(config) do
+      GenServer.call(
+        server,
+        {:lookup_receipt, config.namespace, id, config.max_receipt_bytes},
+        timeout
+      )
+    end
+  end
+
+  def lookup_receipt(%Config{}, _id), do: {:error, :invalid_ledger_receipt_id}
+
+  @impl Spectre.Ledger.Backend
+  def put_receipt_payload(%Config{} = config, %ReceiptWrite{} = write) do
+    with :ok <- ReceiptWrite.validate(write, config),
+         {:ok, server, timeout} <- server(config) do
+      GenServer.call(server, {:put_receipt_payload, config.namespace, write}, timeout)
+    end
+  end
+
+  @impl Spectre.Ledger.Backend
+  def get_receipt_payload(%Config{} = config, ref) when is_binary(ref) and ref != "" do
+    with {:ok, server, timeout} <- server(config) do
+      GenServer.call(
+        server,
+        {:get_receipt_payload, config.namespace, ref, config.max_receipt_bytes},
+        timeout
+      )
+    end
+  end
+
+  def get_receipt_payload(%Config{}, _ref),
+    do: {:error, :invalid_ledger_receipt_payload_ref}
+
+  @impl Spectre.Ledger.Backend
+  def receipt_entries(%Config{} = config, stream_key, opts) do
+    with :ok <- valid_stream_key(stream_key),
+         {:ok, query} <- receipt_entry_query(opts),
+         {:ok, server, timeout} <- server(config) do
+      GenServer.call(server, {:receipt_entries, config.namespace, stream_key, query}, timeout)
+    end
+  end
+
+  @impl Spectre.Ledger.Backend
+  def receipt_objects(%Config{} = config, stream_key, opts) do
+    with :ok <- valid_stream_key(stream_key),
+         :ok <- no_object_options(opts),
+         {:ok, server, timeout} <- server(config) do
+      GenServer.call(
+        server,
+        {:receipt_objects, config.namespace, stream_key, config.max_receipt_bytes},
+        timeout
+      )
     end
   end
 
@@ -230,6 +309,167 @@ defmodule Spectre.Ledger.Backend.Memory do
       {:error, _reason} = error ->
         {:reply, error, state}
     end
+  end
+
+  def handle_call({:append_receipt, namespace, write}, _from, state) do
+    space = namespace(state, namespace)
+
+    case append_boundary_receipt(space, write) do
+      {:ok, status, next_space} ->
+        {:reply, {:ok, status}, Map.put(state, namespace, next_space)}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call({:lookup_receipt, namespace, id, max_bytes}, _from, state) do
+    space = namespace(state, namespace)
+
+    reply =
+      case Map.fetch(space.receipt_index, id) do
+        {:ok, entry} -> receipt_object(space, entry, max_bytes)
+        :error -> :not_found
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:put_receipt_payload, namespace, write}, _from, state) do
+    space = namespace(state, namespace)
+
+    case put_receipt_object(space, write) do
+      {:ok, next_space} ->
+        {:reply, {:ok, write.payload_ref}, Map.put(state, namespace, next_space)}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call({:get_receipt_payload, namespace, ref, max_bytes}, _from, state) do
+    space = namespace(state, namespace)
+    {:reply, payload_object(space, ref, max_bytes), state}
+  end
+
+  def handle_call({:receipt_entries, namespace, stream_key, query}, _from, state) do
+    entries =
+      state
+      |> namespace(namespace)
+      |> Map.fetch!(:receipt_streams)
+      |> Map.get(stream_key, [])
+      |> select_receipt_entries(query)
+
+    {:reply, {:ok, entries}, state}
+  end
+
+  def handle_call({:receipt_objects, namespace, stream_key, max_bytes}, _from, state) do
+    space = namespace(state, namespace)
+    entries = Map.get(space.receipt_streams, stream_key, [])
+    {:reply, receipt_objects_for_entries(space, entries, max_bytes), state}
+  end
+
+  @spec append_boundary_receipt(namespace(), ReceiptWrite.t()) ::
+          {:ok, :appended | :idempotent, namespace()} | {:error, term()}
+  defp append_boundary_receipt(space, %ReceiptWrite{} = write) do
+    with {:ok, space} <- put_receipt_object(space, write) do
+      append_or_replay_boundary_receipt(space, write)
+    end
+  end
+
+  defp append_or_replay_boundary_receipt(space, write) do
+    case Map.fetch(space.receipt_index, write.receipt_id) do
+      {:ok, entry} ->
+        if ReceiptEntry.matches_write?(entry, write),
+          do: {:ok, :idempotent, space},
+          else: {:error, :ledger_receipt_id_conflict}
+
+      :error ->
+        append_new_boundary_receipt(space, write)
+    end
+  end
+
+  defp append_new_boundary_receipt(space, write) do
+    entries = Map.get(space.receipt_streams, write.stream_key, [])
+    previous = List.last(entries)
+    sequence = if previous, do: previous.sequence + 1, else: 1
+    previous_digest = if previous, do: previous.entry_digest, else: nil
+
+    with {:ok, entry} <- ReceiptEntry.new(write, sequence, previous_digest) do
+      next_space = %{
+        space
+        | receipt_streams: Map.put(space.receipt_streams, write.stream_key, entries ++ [entry]),
+          receipt_index: Map.put(space.receipt_index, write.receipt_id, entry)
+      }
+
+      {:ok, :appended, next_space}
+    end
+  end
+
+  defp put_receipt_object(space, %ReceiptWrite{} = write) do
+    object = %{
+      envelope_digest: write.envelope_digest,
+      encoded: write.encoded,
+      byte_size: write.byte_size
+    }
+
+    case Map.fetch(space.receipt_payloads, write.payload_ref) do
+      :error ->
+        {:ok,
+         %{space | receipt_payloads: Map.put(space.receipt_payloads, write.payload_ref, object)}}
+
+      {:ok, ^object} ->
+        {:ok, space}
+
+      {:ok, _different} ->
+        {:error, :ledger_receipt_payload_conflict}
+    end
+  end
+
+  defp receipt_object(space, %ReceiptEntry{} = entry, max_bytes) do
+    with :ok <- ReceiptEntry.verify(entry),
+         {:ok, encoded} <- payload_object(space, entry.payload_ref, max_bytes),
+         {:ok, envelope} <-
+           ReceiptCodec.verify(encoded, entry.receipt_id, entry.envelope_digest, max_bytes),
+         :ok <- ReceiptEntry.verify_envelope(entry, envelope) do
+      {:ok, encoded}
+    end
+  end
+
+  defp payload_object(space, ref, max_bytes) do
+    case Map.fetch(space.receipt_payloads, ref) do
+      {:ok, %{envelope_digest: digest, encoded: encoded, byte_size: byte_size}}
+      when is_binary(encoded) and byte_size == byte_size(encoded) and byte_size <= max_bytes ->
+        with {:ok, envelope} <- ReceiptCodec.decode(encoded, max_bytes),
+             true <- Sink.payload_ref(envelope) == ref,
+             true <- Envelope.digest(envelope) == digest do
+          {:ok, encoded}
+        else
+          false -> {:error, :invalid_ledger_receipt_payload}
+          {:error, _reason} = error -> error
+        end
+
+      {:ok, _invalid} ->
+        {:error, :invalid_ledger_receipt_payload}
+
+      :error ->
+        :not_found
+    end
+  end
+
+  defp receipt_objects_for_entries(space, entries, max_bytes) do
+    Enum.reduce_while(entries, {:ok, %{}}, fn entry, {:ok, objects} ->
+      case receipt_object(space, entry, max_bytes) do
+        {:ok, encoded} ->
+          {:cont, {:ok, Map.put(objects, entry.payload_ref, encoded)}}
+
+        :not_found ->
+          {:halt, {:error, :ledger_receipt_payload_not_found}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
   end
 
   @spec append(namespace(), Write.t()) ::
@@ -499,6 +739,26 @@ defmodule Spectre.Ledger.Backend.Memory do
   defp entry_limit(value) when is_integer(value) and value > 0, do: {:ok, value}
   defp entry_limit(_value), do: {:error, :invalid_ledger_entry_limit}
 
+  @spec receipt_entry_query(term()) :: {:ok, map()} | {:error, term()}
+  defp receipt_entry_query(opts) when is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         true <- length(Keyword.keys(opts)) == length(Enum.uniq(Keyword.keys(opts))),
+         true <- Enum.all?(Keyword.keys(opts), &(&1 in [:after_sequence, :limit])),
+         {:ok, after_sequence} <-
+           after_sequence(Keyword.get(opts, :after_sequence, 0)),
+         {:ok, limit} <- entry_limit(Keyword.get(opts, :limit, :infinity)) do
+      {:ok, %{after_sequence: after_sequence, limit: limit}}
+    else
+      false -> {:error, :invalid_ledger_receipt_entry_query}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp receipt_entry_query(_opts), do: {:error, :invalid_ledger_receipt_entry_query}
+
+  defp after_sequence(value) when is_integer(value) and value >= 0, do: {:ok, value}
+  defp after_sequence(_value), do: {:error, :invalid_ledger_receipt_after_sequence}
+
   defp no_object_options(opts) when is_list(opts) do
     if Keyword.keyword?(opts) and opts == [],
       do: :ok,
@@ -510,6 +770,12 @@ defmodule Spectre.Ledger.Backend.Memory do
   @spec select_entries([Entry.t()], map()) :: [Entry.t()]
   defp select_entries(entries, %{after_revision: after_revision, limit: limit}) do
     selected = Enum.drop_while(entries, &(&1.revision <= after_revision))
+    if limit == :infinity, do: selected, else: Enum.take(selected, limit)
+  end
+
+  @spec select_receipt_entries([ReceiptEntry.t()], map()) :: [ReceiptEntry.t()]
+  defp select_receipt_entries(entries, %{after_sequence: after_sequence, limit: limit}) do
+    selected = Enum.drop_while(entries, &(&1.sequence <= after_sequence))
     if limit == :infinity, do: selected, else: Enum.take(selected, limit)
   end
 
@@ -539,7 +805,13 @@ defmodule Spectre.Ledger.Backend.Memory do
 
   @spec namespace(state(), String.t()) :: namespace()
   defp namespace(state, namespace) do
-    Map.get(state, namespace, %{streams: %{}, aliases: %{}})
+    Map.get(state, namespace, %{
+      streams: %{},
+      aliases: %{},
+      receipt_streams: %{},
+      receipt_index: %{},
+      receipt_payloads: %{}
+    })
   end
 
   @spec new_stream(Entry.t(), binary()) :: stream()

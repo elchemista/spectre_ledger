@@ -1,72 +1,121 @@
 # Architecture
 
-Spectre Ledger is a satellite package around an existing Spectre boundary. It
-does not add history records, an outbox, a second scheduler, or a replay engine
-to Spectre core.
+Spectre Ledger is a satellite package around existing Spectre boundaries. It
+does not add a scheduler, a second canonical history, an outbox, or a replay
+engine to Spectre core.
 
 ## Ownership
 
-- Spectre owns Instances, runtime transitions, checkpoint timing, and recovery.
-- Ledger implements `Spectre.Instance.CheckpointStore` and owns durable
-  checkpoint-chain storage.
+- Spectre owns Instances, runtime transitions, receipt creation, receipt-outbox
+  commits, checkpoint timing, delivery policy, and recovery.
+- Ledger implements `Spectre.Instance.CheckpointStore` and
+  `Spectre.Receipt.Sink`; it owns durable checkpoint and receipt-chain storage.
 - The host owns process supervision, Ecto Repo configuration, credentials,
-  migration execution, retention, authorization, and backup.
-- Lab may consume verified bundles offline. Ledger does not restore runtime
-  Runs for it, but Foundation-backed bundle verification does decode canonical
-  values and can load referenced modules.
+  migration execution, encryption, retention, authorization, and backup.
+- Lab or another consumer may inspect verified evidence offline. Ledger does
+  not restore or replay Runs for it.
 
-Ecto SQL and Postgrex are optional package dependencies. Bundle, chain,
-checkpoint conformance, and Memory consumers do not fetch them transitively.
-The host opts into the PostgreSQL backend by declaring both dependencies and
-continues to own its Repo.
+Ecto SQL and Postgrex are optional package dependencies. Memory, bundle,
+chain, and conformance consumers do not fetch them transitively. A PostgreSQL
+host declares both dependencies and continues to own its Repo.
 
-## Entry chain
+## Two independent chains
 
-Each Entry v1 identifies one successful persisted checkpoint by:
+Checkpoint history and boundary evidence use independent append heads. Keeping
+them separate preserves the semantics of both core boundaries:
 
-- opaque stream key;
-- expected and resulting checkpoint revisions (gaps are valid);
-- Spectre Foundation semantic checkpoint digest;
-- SHA-256 digest of the exact checkpoint bytes;
-- prior entry digest;
-- optional migration-source digest.
+```text
+checkpoint stream                    receipt stream
+revision 3 -> revision 8             sequence 1 -> sequence 2 -> sequence 3
+coalesced persisted state            physical sink append order
+```
 
-Owner fencing tokens are operational metadata. They are stored for diagnostics
-but do not participate in the portable entry identity.
+A checkpoint Entry v1 identifies one successfully persisted checkpoint by its
+opaque stream key, expected/resulting revisions, Foundation semantic digest,
+exact-byte SHA-256 digest, previous entry digest, and optional migration-source
+digest. Revision gaps are valid because Spectre may coalesce checkpoints.
 
-Backends atomically append the blob and entry and advance the stream head.
-Exact retries are idempotent; divergent same-revision writes conflict; stale
-expected revisions are rejected. Ambiguous outcomes are returned to Spectre's
-existing reconciliation boundary.
+A ReceiptEntry v1 identifies one successfully appended envelope by its
+physical sequence, deterministic receipt id, kind, canonical revision,
+envelope digest, content-addressed payload reference, recorded time, and prior
+receipt-entry digest. `sequence` is deliberately not `canonical_revision`:
+observational delivery can append receipts out of canonical order. Verification
+returns `canonical_ordered: false` rather than sorting or rejecting valid
+physical evidence.
+
+Owner fencing tokens are stored as operational metadata on both entry types.
+They do not participate in portable entry identity because retries and recovery
+may use a later owner token without changing the underlying durable boundary.
+
+## Required receipt flow
+
+Ledger does not duplicate Spectre's receipt outbox. With
+`receipt_mode: :required`, the flow remains:
+
+1. Spectre creates and redacts the portable envelope.
+2. Ledger stages canonical envelope bytes at
+   `receipt-payload:<Envelope.digest(envelope)>`.
+3. Spectre commits the boundary plus a compact canonical outbox entry.
+4. Spectre crosses its checkpoint durability barrier.
+5. Ledger appends the receipt idempotently to the physical chain.
+6. Spectre commits the outbox acknowledgement.
+
+If append acknowledgement is lost, Spectre calls `lookup/2`. Ledger verifies
+the stored entry, content-addressed bytes, envelope digest, receipt id, and
+entry-to-envelope linkage before returning it. Exact retries return
+`:idempotent`; the same id with different evidence fails closed.
+
+A crash after step 2 but before the outbox commit can leave an unreferenced
+staged payload. It is intentionally absent from `receipt_objects/3`, which
+returns only objects referenced by committed receipt entries. Retention tooling
+may garbage-collect old staged objects only after proving that no active or
+recoverable outbox can still reference them.
+
+## Backend atomicity
+
+Memory serializes operations in its caller-owned GenServer. It is suitable for
+tests and ephemeral runtimes, not durability.
+
+PostgreSQL uses one locked stream-head row per chain. A receipt append stages or
+verifies the content-addressed payload, locks the receipt stream, resolves an
+exact retry, inserts the immutable entry, and advances the head inside one
+`READ COMMITTED` transaction. The unique receipt id is scoped by namespace.
+Unknown transaction outcomes are reported as ambiguous so Spectre can
+reconcile instead of blindly creating new evidence.
+
+PostgreSQL storage schema v2 adds three receipt tables to the five checkpoint
+tables. The migration accepts schema v1, creates the new tables, and advances
+the storage marker to v2 without rewriting checkpoint entries.
+
+## Verification and claims
+
+`verify/2` verifies a complete checkpoint chain. `verify_receipts/2` verifies a
+complete receipt chain, the exact referenced object set, canonical envelope
+decoding, and every entry-to-envelope link. Receipt reports count boundaries
+whose pre/post state digests are both present and explicitly keep these claims
+false:
+
+- deterministic replay;
+- every-revision capture;
+- exactly-once provider calls;
+- exactly-once external effects.
+
+State roots prove linkage to canonical state around recorded boundaries. They
+do not make the work between roots deterministic.
 
 ## Bundle v1
 
 `Spectre.Ledger.Bundle` exports a closed JSON envelope containing one complete
-entry chain, an exact object map, an honest completeness manifest, and a global
-checksum. Canonical JSON recursively sorts object keys. Bundle bytes therefore
-do not vary with Elixir map enumeration order.
+checkpoint Entry chain, its exact object map, an honest completeness manifest,
+and a global checksum. Receipt chains are not part of Bundle v1.
 
-Verification proceeds without replaying runtime behavior:
+Verification bounds encoded bytes and nesting, rejects duplicate/unknown keys,
+checks the checksum, decodes bounded objects, verifies the chain and object
+set, and calls Spectre Foundation for checkpoint semantics. It does not call
+`Spectre.Run.restore/1` or replay runtime work.
 
-1. bound encoded bytes and JSON nesting;
-2. reject duplicate/unknown keys and verify the checksum;
-3. decode bounded objects from canonical base64;
-4. verify the Entry chain and exact object set;
-5. compare each raw object digest;
-6. call the public Spectre Foundation checkpoint verifier and compare semantic
-   digest and revision.
-
-The Foundation verifier decodes and rewrites canonical Instance state but does
-not perform Agent activation. Bundle code never calls `Spectre.Run.restore/1`
-and does not replay model, action, or effect execution. Canonical decoding calls
-`Spectre.Run.Value.prepare/1`, however, which may load an existing BEAM module
-named by the checkpoint through `Code.ensure_loaded?/1`; module loading can run
-`@on_load`. Foundation-backed bundle verification is consequently a
-trusted/local-artifact boundary, not an untrusted-input sandbox. Externally
-supplied bundles require an isolated, restricted node and a pre-vetted module
-set; Bundle v1 has no strong pre-decode module allowlist.
-
-The Bundle v1 manifest claims only persisted checkpoint playback. Spectre may
-coalesce checkpoint revisions, and checkpoint playback does not reproduce model
-or external side effects; every-revision and deterministic-replay flags are
-therefore permanently false in v1.
+Foundation checkpoint validation and receipt decoding both process Spectre
+portable values. `Spectre.Run.Value.prepare/1` may load an existing BEAM module
+named by those values, and loading can run `@on_load`. These are
+trusted/local-artifact boundaries, not untrusted-input sandboxes. External
+artifacts require an isolated restricted node and a pre-vetted module set.

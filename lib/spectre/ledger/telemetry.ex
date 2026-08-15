@@ -14,6 +14,10 @@ defmodule Spectre.Ledger.Telemetry do
     * `[:spectre, :ledger, :checkpoint, :load, :stop]`
     * `[:spectre, :ledger, :checkpoint, :compare_and_swap, :stop]`
     * `[:spectre, :ledger, :checkpoint, :migrate, :stop]`
+    * `[:spectre, :ledger, :receipt, :append, :stop]`
+    * `[:spectre, :ledger, :receipt, :lookup, :stop]`
+    * `[:spectre, :ledger, :receipt, :put_payload, :stop]`
+    * `[:spectre, :ledger, :receipt, :get_payload, :stop]`
     * `[:spectre, :ledger, :doctor, :stop]`
 
   Backends may use the same boundary for append and load observations.
@@ -28,12 +32,14 @@ defmodule Spectre.Ledger.Telemetry do
   alias Spectre.Canonical.Value
 
   @measurement_keys [:byte_count, :count, :duration_us, :entry_count, :object_count]
-  @atom_metadata_keys [:operation, :outcome, :status]
+  @atom_metadata_keys [:operation, :outcome, :receipt_kind, :status]
   @integer_metadata_keys [
     :bundle_version,
     :expected_revision,
     :head_revision,
+    :canonical_revision,
     :revision,
+    :sequence,
     :schema_version,
     :table_count
   ]

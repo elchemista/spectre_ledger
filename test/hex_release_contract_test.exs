@@ -3,7 +3,7 @@ defmodule SpectreLedger.HexReleaseContractTest do
 
   @root Path.expand("..", __DIR__)
   @version "0.1.0"
-  @spectre_requirement "~> 0.3.1"
+  @spectre_requirement "~> 0.3.2"
   @documentation_files ["README.md", "CHANGELOG.md", "SECURITY.md"] ++
                          Path.wildcard("docs/*.md", match_dot: true)
   @bundle_security_files [
@@ -22,13 +22,16 @@ defmodule SpectreLedger.HexReleaseContractTest do
     "Verification proceeds without executing checkpoint contents"
   ]
 
-  test "Mix and Hex metadata describe the 0.1.0 release for Spectre 0.3.1" do
+  test "Mix and Hex metadata describe the 0.1.0 release for Spectre 0.3.2" do
     config = Mix.Project.config()
     package = Keyword.fetch!(config, :package)
 
     assert config[:version] == @version
     assert config[:homepage_url] == "https://github.com/elchemista/spectre_ledger"
-    assert config[:description] == "Append-only durable checkpoint ledger for Spectre."
+
+    assert config[:description] ==
+             "Append-only durable checkpoint and boundary-receipt ledger for Spectre."
+
     assert package[:name] == "spectre_ledger"
     assert package[:maintainers] == ["elchemista"]
     assert package[:licenses] == ["Apache-2.0"]
@@ -166,7 +169,7 @@ defmodule SpectreLedger.HexReleaseContractTest do
     refute "mix.lock" in files
   end
 
-  test "local Spectre override is development-only and stays on 0.3.1" do
+  test "local Spectre override is development-only and stays on 0.3.2" do
     assert File.read!(Path.join(@root, "mix.exs")) =~
              ~s({:spectre, "#{@spectre_requirement}"})
 
@@ -180,7 +183,7 @@ defmodule SpectreLedger.HexReleaseContractTest do
 
         assert opts[:override] == true
         assert opts[:path] == Path.expand(path, @root)
-        assert Spectre.version() == "0.3.1"
+        assert Spectre.version() == "0.3.2"
 
       _other ->
         assert {:spectre, @spectre_requirement} =

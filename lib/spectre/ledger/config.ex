@@ -4,21 +4,30 @@ defmodule Spectre.Ledger.Config do
 
   Runtime handles such as a Memory server or an Ecto Repo stay in
   `backend_opts`; they are never part of a Spectre Stack definition or a
-  persisted Ledger entry.
+  persisted Ledger entry. Checkpoint and receipt byte limits are independent;
+  both default to 8,000,000 bytes.
   """
 
   @default_namespace "default"
   @default_max_checkpoint_bytes 8_000_000
-  @common_keys [:backend, :namespace, :max_checkpoint_bytes]
+  @default_max_receipt_bytes 8_000_000
+  @common_keys [:backend, :namespace, :max_checkpoint_bytes, :max_receipt_bytes]
 
-  @enforce_keys [:backend, :backend_opts, :namespace, :max_checkpoint_bytes]
-  defstruct [:backend, :backend_opts, :namespace, :max_checkpoint_bytes]
+  @enforce_keys [
+    :backend,
+    :backend_opts,
+    :namespace,
+    :max_checkpoint_bytes,
+    :max_receipt_bytes
+  ]
+  defstruct @enforce_keys
 
   @type t :: %__MODULE__{
           backend: module(),
           backend_opts: keyword(),
           namespace: String.t(),
-          max_checkpoint_bytes: pos_integer()
+          max_checkpoint_bytes: pos_integer(),
+          max_receipt_bytes: pos_integer()
         }
 
   @doc "Builds a runtime configuration without persisting runtime handles."
@@ -33,12 +42,15 @@ defmodule Spectre.Ledger.Config do
          {:ok, max_bytes} <-
            max_checkpoint_bytes(
              Keyword.get(opts, :max_checkpoint_bytes, @default_max_checkpoint_bytes)
-           ) do
+           ),
+         {:ok, max_receipt_bytes} <-
+           max_receipt_bytes(Keyword.get(opts, :max_receipt_bytes, @default_max_receipt_bytes)) do
       config = %__MODULE__{
         backend: backend,
         backend_opts: Keyword.drop(opts, @common_keys),
         namespace: namespace,
-        max_checkpoint_bytes: max_bytes
+        max_checkpoint_bytes: max_bytes,
+        max_receipt_bytes: max_receipt_bytes
       }
 
       validate(config)
@@ -70,7 +82,8 @@ defmodule Spectre.Ledger.Config do
 
       true ->
         with {:ok, _namespace} <- namespace(config.namespace),
-             {:ok, _max_bytes} <- max_checkpoint_bytes(config.max_checkpoint_bytes) do
+             {:ok, _max_bytes} <- max_checkpoint_bytes(config.max_checkpoint_bytes),
+             {:ok, _max_receipt_bytes} <- max_receipt_bytes(config.max_receipt_bytes) do
           {:ok, config}
         end
     end
@@ -96,6 +109,12 @@ defmodule Spectre.Ledger.Config do
     do: {:ok, value}
 
   defp max_checkpoint_bytes(_value), do: {:error, :invalid_max_checkpoint_bytes}
+
+  @spec max_receipt_bytes(term()) :: {:ok, pos_integer()} | {:error, term()}
+  defp max_receipt_bytes(value) when is_integer(value) and value > 0,
+    do: {:ok, value}
+
+  defp max_receipt_bytes(_value), do: {:error, :invalid_max_receipt_bytes}
 
   defp unique_keys?(opts) do
     keys = Keyword.keys(opts)

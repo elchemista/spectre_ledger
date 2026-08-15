@@ -13,6 +13,18 @@ defmodule SpectreLedger.DoctorTest.IncompleteBackend do
   def load(_config, _ref), do: :not_found
 end
 
+defmodule SpectreLedger.DoctorTest.PartialReceiptBackend do
+  @behaviour Spectre.Ledger.Backend
+
+  def load(_config, _ref), do: :not_found
+  def compare_and_swap(_config, _write), do: {:error, :unsupported}
+  def head(_config, _stream_key), do: :not_found
+  def entries(_config, _stream_key, _opts), do: {:ok, []}
+  def objects(_config, _stream_key, _opts), do: {:ok, %{}}
+  def put_stream(_config, _stream_key, _entries, _objects), do: {:error, :unsupported}
+  def append_receipt(_config, _write), do: {:error, :unsupported}
+end
+
 defmodule SpectreLedger.DoctorTest.DiagnosticBackend do
   @behaviour Spectre.Ledger.Backend
 
@@ -45,7 +57,7 @@ defmodule SpectreLedger.DoctorTest do
 
     assert report.status == :warning
     assert report.core.status == :ok
-    assert report.summary.total == report.core.summary.total + 3
+    assert report.summary.total == report.core.summary.total + 4
     assert report.summary.warnings == 1
 
     assert %{status: :warning, code: :memory_backend_volatile, details: details} =
@@ -61,13 +73,16 @@ defmodule SpectreLedger.DoctorTest do
     assert %{
              "status" => "warning",
              "summary" => %{"warnings" => 1},
-             "core" => %{"spectre_version" => "0.3.1"}
+             "core" => %{"spectre_version" => "0.3.2"}
            } = report |> Report.format(:json) |> Jason.decode!()
 
     assert Report.format(report, :text) =~ "Spectre Ledger doctor 0.1.0: warning"
 
     assert %{status: :ok, code: :ledger_bundle_contract_observed} =
              Enum.find(report.checks, &(&1.id == "ledger.bundle"))
+
+    assert %{status: :ok, code: :receipt_backend_callbacks_valid} =
+             Enum.find(report.checks, &(&1.id == "ledger.receipts"))
   end
 
   test "custom backend diagnostics are callback-only and perform no backend I/O" do
@@ -76,6 +91,9 @@ defmodule SpectreLedger.DoctorTest do
 
     assert %{status: :ok, code: :custom_backend_callbacks_valid} =
              Enum.find(report.checks, &(&1.id == "ledger.backend"))
+
+    assert %{status: :skipped, code: :receipt_backend_not_configured} =
+             Enum.find(report.checks, &(&1.id == "ledger.receipts"))
   end
 
   test "reports a missing backend callback without leaking configuration" do
@@ -99,6 +117,16 @@ defmodule SpectreLedger.DoctorTest do
 
     assert %{status: :error, code: :ledger_backend_not_loaded} =
              Enum.find(unavailable.checks, &(&1.id == "ledger.backend"))
+  end
+
+  test "fails closed when a custom backend exposes only part of the receipt capability" do
+    assert {:ok, report} =
+             Doctor.run(backend: SpectreLedger.DoctorTest.PartialReceiptBackend)
+
+    assert report.status == :error
+
+    assert %{status: :error, code: :receipt_backend_callbacks_incomplete} =
+             Enum.find(report.checks, &(&1.id == "ledger.receipts"))
   end
 
   test "uses an explicitly read-only custom schema diagnostic when provided" do

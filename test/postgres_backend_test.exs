@@ -18,6 +18,7 @@ defmodule SpectreLedger.PostgresBackendTest do
   alias Spectre.Instance.CheckpointStore, as: CoreCheckpointStore
   alias Spectre.Instance.CheckpointStore.Conformance
   alias Spectre.Instance.Ref
+  alias Spectre.Ledger
   alias Spectre.Ledger.Backend.Conformance, as: LedgerConformance
   alias Spectre.Ledger.Backend.Postgres
   alias Spectre.Ledger.Backend.Postgres.Migration
@@ -28,6 +29,10 @@ defmodule SpectreLedger.PostgresBackendTest do
   alias Spectre.Ledger.Config
   alias Spectre.Ledger.Entry
   alias Spectre.Ledger.Receipt
+  alias Spectre.Ledger.ReceiptBackend.Conformance, as: ReceiptBackendConformance
+  alias Spectre.Receipt.Envelope
+  alias Spectre.Receipt.Sink
+  alias Spectre.Receipt.Sink.Conformance, as: ReceiptConformance
   alias Spectre.State
   alias Spectre.Subject
   alias SpectreLedger.PostgresTestRepo, as: Repo
@@ -42,7 +47,7 @@ defmodule SpectreLedger.PostgresBackendTest do
     {:ok, cluster: cluster}
   end
 
-  test "migration installs all five tables, doctor is read-only, and down is reversible" do
+  test "migration installs all eight tables, doctor is read-only, and down is reversible" do
     suffix = System.unique_integer([:positive, :monotonic])
     prefix = "ledger_migration_#{suffix}"
     config = config!(postgres_opts("doctor", prefix))
@@ -55,7 +60,7 @@ defmodule SpectreLedger.PostgresBackendTest do
     assert :ok = migrate(:up, prefix)
     assert {:ok, installed} = Postgres.doctor(config)
     assert installed.ready?
-    assert installed.schema_version == 1
+    assert installed.schema_version == 2
     assert Enum.all?(installed.tables, fn {_table, present?} -> present? end)
 
     assert :ok = migrate(:down, prefix)
@@ -78,11 +83,14 @@ defmodule SpectreLedger.PostgresBackendTest do
         "updated_at" timestamptz NOT NULL DEFAULT transaction_timestamp()
       )
       """,
-      "INSERT INTO #{Names.qualified(names, :meta)} (\"key\", \"value\") VALUES ('schema_version', '1')",
+      "INSERT INTO #{Names.qualified(names, :meta)} (\"key\", \"value\") VALUES ('schema_version', '2')",
       "CREATE TABLE #{Names.qualified(names, :streams)} (\"placeholder\" integer)",
       "CREATE TABLE #{Names.qualified(names, :blobs)} (\"placeholder\" integer)",
       "CREATE TABLE #{Names.qualified(names, :entries)} (\"placeholder\" integer)",
-      "CREATE TABLE #{Names.qualified(names, :aliases)} (\"placeholder\" integer)"
+      "CREATE TABLE #{Names.qualified(names, :aliases)} (\"placeholder\" integer)",
+      "CREATE TABLE #{Names.qualified(names, :receipt_streams)} (\"placeholder\" integer)",
+      "CREATE TABLE #{Names.qualified(names, :receipt_payloads)} (\"placeholder\" integer)",
+      "CREATE TABLE #{Names.qualified(names, :receipt_entries)} (\"placeholder\" integer)"
     ]
 
     Enum.each(statements, fn statement ->
@@ -91,9 +99,46 @@ defmodule SpectreLedger.PostgresBackendTest do
 
     assert {:ok, diagnostic} = Postgres.doctor(config)
     refute diagnostic.ready?
-    assert diagnostic.schema_version == 1
+    assert diagnostic.schema_version == 2
     assert Enum.all?(diagnostic.tables, fn {_table, present?} -> present? end)
     refute Enum.all?(diagnostic.columns, fn {_table, valid?} -> valid? end)
+
+    assert :ok = migrate(:down, prefix)
+  end
+
+  test "migration upgrades storage schema 1 in place without replacing checkpoint tables" do
+    suffix = System.unique_integer([:positive, :monotonic])
+    prefix = "ledger_upgrade_#{suffix}"
+    config = config!(postgres_opts("upgrade", prefix))
+
+    assert {:ok, statements} = Migration.up_sql(table_prefix: prefix)
+
+    version_one =
+      statements
+      |> Enum.reject(fn statement ->
+        String.contains?(statement, "_receipt_") or
+          String.starts_with?(String.trim_leading(statement), "UPDATE ")
+      end)
+      |> Enum.map(fn statement ->
+        String.replace(
+          statement,
+          "VALUES ('schema_version', '2')",
+          "VALUES ('schema_version', '1')"
+        )
+      end)
+
+    assert :ok = execute_migration(version_one)
+    assert {:ok, before} = Postgres.doctor(config)
+    refute before.ready?
+    assert before.schema_version == 1
+    assert before.tables.streams
+    refute before.tables.receipt_entries
+
+    assert :ok = migrate(:up, prefix)
+    assert {:ok, upgraded} = Postgres.doctor(config)
+    assert upgraded.ready?
+    assert upgraded.schema_version == 2
+    assert Enum.all?(upgraded.tables, fn {_table, present?} -> present? end)
 
     assert :ok = migrate(:down, prefix)
   end
@@ -131,6 +176,59 @@ defmodule SpectreLedger.PostgresBackendTest do
     assert report.head_revision == 3
     assert is_binary(report.bundle_checksum)
     assert report.import == :verified
+  end
+
+  test "persists core boundary receipts with atomic idempotent append and verified readback" do
+    namespace = "receipt-#{System.unique_integer([:positive, :monotonic])}"
+    opts = postgres_opts(namespace)
+
+    assert {:ok, report} = ReceiptConformance.run(Ledger.receipt_sink(opts))
+    assert report.append == :verified
+    assert report.idempotency == :verified
+    assert report.lookup == :verified
+    assert report.payload_store == :verified
+
+    stream_key = "instance:postgres-receipts"
+    first = receipt_envelope(stream_key, 1)
+    second = receipt_envelope(stream_key, 2)
+    assert {:ok, sink} = Sink.normalize(Ledger.receipt_sink(opts))
+
+    results =
+      1..8
+      |> Task.async_stream(fn _index -> Sink.append(sink, first, []) end,
+        max_concurrency: 8,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &(&1 == {:ok, :appended})) == 1
+    assert Enum.count(results, &(&1 == {:ok, :idempotent})) == 7
+    assert {:ok, :appended} = Sink.append(sink, second, [])
+    assert {:ok, ^first} = Ledger.receipt(first.id, opts)
+    assert {:ok, [^first, ^second]} = Ledger.receipts(stream_key, opts)
+
+    assert {:ok, verification} = Ledger.verify_receipts(stream_key, opts)
+    assert verification.entry_count == 2
+    assert verification.object_count == 2
+    assert verification.head_sequence == 2
+    assert verification.canonical_ordered
+  end
+
+  test "passes the complete Ledger receipt-backend conformance" do
+    suffix = System.unique_integer([:positive, :monotonic])
+    opts = postgres_opts("receipt-backend-conformance-#{suffix}")
+
+    assert {:ok, report} =
+             ReceiptBackendConformance.run(
+               opts,
+               "instance:postgres-receipt-conformance:#{suffix}"
+             )
+
+    assert report.contract_version == 1
+    assert report.concurrent_append == :single_winner
+    assert report.entry_count == 2
+    assert report.head_sequence == 2
+    assert report.archive == :verified
   end
 
   test "persists coalesced revisions, accepts exact retry, and rejects stale or divergent writes" do
@@ -396,6 +494,26 @@ defmodule SpectreLedger.PostgresBackendTest do
     assert {:error, :invalid_ledger_objects_options} = Postgres.objects(left, ref.key, :invalid)
     assert {:error, :invalid_ledger_objects_options} = Postgres.objects(left, ref.key, limit: 1)
     assert {:error, :invalid_ledger_import} = Postgres.put_stream(left, "", [], %{})
+    assert {:error, :invalid_ledger_receipt_id} = Postgres.lookup_receipt(left, "")
+
+    assert {:error, :invalid_ledger_receipt_payload_ref} =
+             Postgres.get_receipt_payload(left, "")
+
+    assert {:error, :invalid_ledger_receipt_entries_options} =
+             Postgres.receipt_entries(left, "", [])
+
+    assert {:error, :invalid_ledger_receipt_entries_options} =
+             Postgres.receipt_entries(left, ref.key, unknown: true)
+
+    assert {:error, :invalid_ledger_receipt_entries_options} =
+             Postgres.receipt_entries(left, ref.key, limit: 1, limit: 2)
+
+    assert {:error, :invalid_ledger_receipt_entry_limit} =
+             Postgres.receipt_entries(left, ref.key, limit: 1_000_001)
+
+    assert {:error, :invalid_ledger_receipt_objects_options} =
+             Postgres.receipt_objects(left, ref.key, limit: 1)
+
     assert {:error, :invalid_ledger_config} = Postgres.doctor(:invalid)
 
     missing_repo = config!(backend: :postgres, repo: SpectreLedger.MissingRepo)
@@ -408,6 +526,33 @@ defmodule SpectreLedger.PostgresBackendTest do
 
     assert {:error, :invalid_ledger_postgres_options} =
              Postgres.head(config!(backend: :postgres, repo: Repo, query_opts: %{}), ref.key)
+  end
+
+  test "receipt lookup and archive verification fail closed on corrupted durable bytes" do
+    suffix = System.unique_integer([:positive, :monotonic])
+    namespace = "corrupt-receipt-#{suffix}"
+    opts = postgres_opts(namespace)
+    envelope = receipt_envelope("instance:corrupt-receipt:#{suffix}", 1)
+    assert {:ok, sink} = Sink.normalize(Ledger.receipt_sink(opts))
+    assert {:ok, :appended} = Sink.append(sink, envelope, [])
+    assert {:ok, names} = Names.new(table_prefix: @table_prefix)
+
+    assert {:ok, _result} =
+             SQL.query(
+               Repo,
+               """
+               UPDATE #{Names.qualified(names, :receipt_payloads)}
+               SET "envelope" = $3, "byte_size" = $4
+               WHERE "namespace" = $1 AND "payload_ref" = $2
+               """,
+               [namespace, Sink.payload_ref(envelope), "corrupt", byte_size("corrupt")],
+               log: false
+             )
+
+    assert {:error, :invalid_ledger_receipt_json} = Ledger.receipt(envelope.id, opts)
+
+    assert {:error, :invalid_ledger_receipt_json} =
+             Ledger.verify_receipts(envelope.instance_ref, opts)
   end
 
   test "load fails closed when a durable head or checkpoint object is corrupted" do
@@ -717,6 +862,19 @@ defmodule SpectreLedger.PostgresBackendTest do
     Ref.new(
       AgentRef.from_id("ledger-postgres-#{label}-#{id}"),
       Subject.new("ledger-postgres-subject-#{label}-#{id}")
+    )
+  end
+
+  defp receipt_envelope(stream_key, canonical_revision) do
+    Envelope.new!(
+      kind: :nondeterminism_sample,
+      instance_ref: stream_key,
+      canonical_revision: canonical_revision,
+      correlation_id: "#{stream_key}:#{canonical_revision}",
+      payload_schema_ref: "spectre-ledger.postgres-test/sample-1",
+      payload: %{sample: canonical_revision},
+      privacy: :internal,
+      recorded_at: 1_800_000_000_000 + canonical_revision
     )
   end
 

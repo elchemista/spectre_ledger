@@ -14,7 +14,7 @@ defmodule SpectreLedger.MixProject do
       deps: deps(),
       test_coverage: [summary: [threshold: 90]],
       test_ignore_filters: [&String.starts_with?(&1, "test/support/")],
-      description: "Append-only durable checkpoint ledger for Spectre.",
+      description: "Append-only durable checkpoint and boundary-receipt ledger for Spectre.",
       package: package(),
       docs: docs(),
       dialyzer: [plt_add_apps: [:mix, :ecto_sql]],
@@ -45,7 +45,7 @@ defmodule SpectreLedger.MixProject do
         {:spectre, path: Path.expand(path, __DIR__), override: true}
 
       _other ->
-        {:spectre, "~> 0.3.1"}
+        {:spectre, "~> 0.3.2"}
     end
   end
 

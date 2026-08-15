@@ -1,34 +1,45 @@
 defmodule Spectre.Ledger do
   @moduledoc """
-  Append-only durable checkpoint ledger for Spectre 0.3.1.
+  Append-only durable checkpoint and boundary-receipt ledger for Spectre 0.3.2.
 
-  Ledger implements the existing `Spectre.Instance.CheckpointStore` boundary.
-  It archives the checkpoints that Spectre persists; it does not claim every
-  runtime revision, deterministic replay, or exactly-once side effects.
+  Ledger implements `Spectre.Instance.CheckpointStore` and
+  `Spectre.Receipt.Sink`. It archives checkpoints that Spectre persists and
+  boundary receipts that Spectre emits; it does not claim every runtime
+  revision, deterministic replay, or exactly-once side effects.
   """
 
   use Spectre.Stack.Installable,
     id: :spectre_ledger,
     version: "0.1.0",
     contract: 1,
-    spectre: "~> 0.3.1",
+    spectre: "~> 0.3.2",
     provides: [
       {:contract, {:spectre, :instance_checkpoint_store, 1}},
-      {:service, {:spectre_ledger, :checkpoint_archive, 1}}
+      {:contract, {:spectre, :receipt_sink, 1}},
+      {:service, {:spectre_ledger, :checkpoint_archive, 1}},
+      {:service, {:spectre_ledger, :boundary_receipt_archive, 1}}
     ],
     metadata: %{
-      ledger_contract: 1,
+      ledger_contract: 2,
       entry_contract: 1,
+      receipt_entry_contract: 1,
       bundle_contract: 1,
-      capture: :persisted_checkpoints,
+      capture: [:persisted_checkpoints, :nondeterministic_boundaries],
+      state_digest_linkage: true,
       every_revision: false,
-      deterministic_replay: false
+      deterministic_replay: false,
+      exactly_once_external_effects: false
     }
 
   alias Spectre.Instance.Ref
+  alias Spectre.Ledger.Backend.Capabilities
   alias Spectre.Ledger.Bundle
   alias Spectre.Ledger.Chain
   alias Spectre.Ledger.Config
+  alias Spectre.Ledger.ReceiptChain
+  alias Spectre.Ledger.ReceiptCodec
+  alias Spectre.Ledger.ReceiptEntry
+  alias Spectre.Ledger.ReceiptSink
 
   @version "0.1.0"
 
@@ -40,6 +51,83 @@ defmodule Spectre.Ledger do
   @spec checkpoint_store(keyword()) :: {module(), keyword()}
   def checkpoint_store(opts \\ []) when is_list(opts),
     do: {Spectre.Ledger.CheckpointStore, opts}
+
+  @doc "Builds the configuration consumed by `Spectre.Instance` for boundary receipts."
+  @spec receipt_sink(keyword()) :: {module(), keyword()}
+  def receipt_sink(opts \\ []) when is_list(opts), do: {ReceiptSink, opts}
+
+  @doc "Looks up one persisted boundary receipt by deterministic receipt id."
+  @spec receipt(String.t(), keyword()) ::
+          {:ok, Spectre.Receipt.Envelope.t()} | :not_found | {:error, term()}
+  def receipt(id, opts \\ [])
+
+  def receipt(id, opts) when is_binary(id) and id != "" and is_list(opts),
+    do: ReceiptSink.lookup(id, opts)
+
+  def receipt(_id, _opts), do: {:error, :invalid_ledger_receipt_id}
+
+  @doc "Reads one content-addressed receipt payload, including a staged payload."
+  @spec receipt_payload(String.t(), keyword()) ::
+          {:ok, Spectre.Receipt.Envelope.t()} | :not_found | {:error, term()}
+  def receipt_payload(ref, opts \\ [])
+
+  def receipt_payload(ref, opts) when is_binary(ref) and ref != "" and is_list(opts),
+    do: ReceiptSink.get_payload(ref, opts)
+
+  def receipt_payload(_ref, _opts), do: {:error, :invalid_ledger_receipt_payload_ref}
+
+  @doc "Lists immutable receipt-chain entries in physical append order."
+  @spec receipt_entries(Ref.t() | String.t(), keyword()) ::
+          {:ok, [ReceiptEntry.t()]} | {:error, term()}
+  def receipt_entries(ref_or_key, opts \\ []) do
+    with {:ok, config} <- Config.new(opts),
+         {:ok, stream_key} <- stream_key(ref_or_key),
+         :ok <- Capabilities.validate(config.backend, :receipt_archive) do
+      query = Keyword.take(opts, [:after_sequence, :limit])
+      config.backend.receipt_entries(config, stream_key, query)
+    end
+  end
+
+  @doc "Lists validated receipt envelopes in physical append order."
+  @spec receipts(Ref.t() | String.t(), keyword()) ::
+          {:ok, [Spectre.Receipt.Envelope.t()]} | {:error, term()}
+  def receipts(ref_or_key, opts \\ []) do
+    with {:ok, config} <- Config.new(opts),
+         {:ok, stream_key} <- stream_key(ref_or_key),
+         :ok <- Capabilities.validate(config.backend, :receipt_archive),
+         {:ok, entries} <-
+           config.backend.receipt_entries(
+             config,
+             stream_key,
+             Keyword.take(opts, [:after_sequence, :limit])
+           ),
+         {:ok, objects} <- config.backend.receipt_objects(config, stream_key, []) do
+      decode_receipts(entries, objects, config.max_receipt_bytes)
+    end
+  end
+
+  @doc "Verifies one complete receipt chain and every referenced envelope object."
+  @spec verify_receipts(Ref.t() | String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def verify_receipts(ref_or_key, opts \\ []) do
+    with :ok <- complete_receipt_options(opts),
+         {:ok, config} <- Config.new(opts),
+         {:ok, stream_key} <- stream_key(ref_or_key),
+         :ok <- Capabilities.validate(config.backend, :receipt_archive),
+         {:ok, entries} <- config.backend.receipt_entries(config, stream_key, []),
+         {:ok, chain} <- ReceiptChain.verify(entries),
+         {:ok, objects} <- config.backend.receipt_objects(config, stream_key, []),
+         :ok <- exact_receipt_objects(entries, objects),
+         {:ok, envelopes} <- decode_receipts(entries, objects, config.max_receipt_bytes) do
+      {:ok,
+       chain
+       |> Map.put(:object_count, map_size(objects))
+       |> Map.put(:linked_state_count, linked_state_count(envelopes))
+       |> Map.put(:capture, :nondeterministic_boundaries)
+       |> Map.put(:state_digest_linkage, true)
+       |> Map.put(:deterministic_replay_claim, false)
+       |> Map.put(:exactly_once_external_effects, false)}
+    end
+  end
 
   @doc "Returns the durable head entry for a Ref or opaque stream key."
   @spec head(Ref.t() | String.t(), keyword()) ::
@@ -116,6 +204,64 @@ defmodule Spectre.Ledger do
   end
 
   defp complete_stream_options(_opts), do: {:error, :invalid_ledger_options}
+
+  defp complete_receipt_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and not Keyword.has_key?(opts, :after_sequence) and
+         not Keyword.has_key?(opts, :limit),
+       do: :ok,
+       else: {:error, :partial_ledger_receipt_stream_not_verifiable}
+  end
+
+  defp complete_receipt_options(_opts), do: {:error, :invalid_ledger_options}
+
+  defp decode_receipts(entries, objects, max_bytes) do
+    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, envelopes} ->
+      result =
+        with {:ok, encoded} <- fetch_receipt_object(objects, entry.payload_ref),
+             {:ok, envelope} <-
+               ReceiptCodec.verify(
+                 encoded,
+                 entry.receipt_id,
+                 entry.envelope_digest,
+                 max_bytes
+               ),
+             :ok <- ReceiptEntry.verify_envelope(entry, envelope) do
+          {:ok, envelope}
+        end
+
+      case result do
+        {:ok, envelope} -> {:cont, {:ok, [envelope | envelopes]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, envelopes} -> {:ok, Enum.reverse(envelopes)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp fetch_receipt_object(objects, ref) do
+    case Map.fetch(objects, ref) do
+      {:ok, encoded} when is_binary(encoded) -> {:ok, encoded}
+      {:ok, _invalid} -> {:error, :invalid_ledger_receipt_object}
+      :error -> {:error, {:ledger_receipt_object_missing, ref}}
+    end
+  end
+
+  defp exact_receipt_objects(entries, objects) do
+    expected = entries |> Enum.map(& &1.payload_ref) |> MapSet.new()
+    supplied = objects |> Map.keys() |> MapSet.new()
+
+    if expected == supplied,
+      do: :ok,
+      else: {:error, :ledger_receipt_object_set_mismatch}
+  end
+
+  defp linked_state_count(envelopes) do
+    Enum.count(envelopes, fn envelope ->
+      is_binary(envelope.pre_state_digest) and is_binary(envelope.post_state_digest)
+    end)
+  end
 
   defp backend_callback(module, function, arity) do
     cond do
