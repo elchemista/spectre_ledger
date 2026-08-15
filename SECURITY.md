@@ -8,10 +8,19 @@ or customer data in a public issue.
 
 ## Trust boundaries
 
-Ledger checkpoints and bundles can contain application state. Content
-addressing proves integrity, not confidentiality, authorization, provenance, or
-safe execution. Encrypt storage and transport where required, restrict database
-and bundle access, and apply application retention policy independently.
+Ledger checkpoints, boundary receipts, staged receipt payloads, and bundles can
+contain application state. Spectre applies its constitutional receipt redactor,
+but ordinary admitted input, model output, and effect arguments/results remain
+confidential evidence. Content addressing proves integrity, not confidentiality,
+authorization, provenance, or safe execution. Encrypt storage and transport
+where required, restrict database and artifact access, isolate namespaces, and
+apply application retention policy independently.
+
+In required receipt mode, payload objects must be retained for at least as long
+as any canonical outbox or receipt entry can reference them. A crash after
+payload staging but before outbox commit can leave an unreferenced object. Use a
+deployment-specific recovery grace period before garbage collection; Ledger
+0.1.0 does not delete staged objects automatically.
 
 Bundle verification:
 
@@ -23,8 +32,9 @@ Bundle verification:
 - does not call `Spectre.Run.restore/1`, start an Instance, activate an Agent,
   or replay model, action, or effect execution.
 
-Foundation validation is not a no-code or untrusted-input sandbox. It decodes
-canonical checkpoint values, and `Spectre.Run.Value.prepare/1` may call
+Foundation validation and Ledger receipt decoding are not no-code or
+untrusted-input sandboxes. They decode Spectre portable values, and
+`Spectre.Run.Value.prepare/1` may call
 `Code.ensure_loaded?/1` for an existing BEAM module named by the checkpoint.
 Loading such a module can run its `@on_load` callback. The size, shape, checksum,
 and digest checks above establish boundedness and integrity; they do not remove
@@ -43,11 +53,12 @@ Hosts must apply their own manifest and policy allowlists before playback or
 import.
 
 PostgreSQL credentials and Repo configuration belong to the host application.
-Ledger never persists them in entries or bundles. Doctor is read-only and
-telemetry emits classified errors and digested identifiers, not raw error
-terms, stream keys, checkpoints, or connection configuration.
+Ledger never persists them in entries, receipt envelopes, or bundles. Doctor
+is read-only and telemetry emits classified errors and digested identifiers,
+not raw error terms, stream keys, receipt payloads, checkpoints, or connection
+configuration.
 
 ## Supported versions
 
 Security fixes are provided for the latest released Spectre Ledger 0.1.x
-version while it remains compatible with Spectre 0.3.1.
+version while it remains compatible with Spectre 0.3.2.
