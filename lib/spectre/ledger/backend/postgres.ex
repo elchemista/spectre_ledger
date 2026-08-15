@@ -1,11 +1,12 @@
 defmodule Spectre.Ledger.Backend.Postgres do
   @moduledoc """
-  PostgreSQL backend for the Spectre Ledger checkpoint store.
+  PostgreSQL backend for Spectre Ledger checkpoints and boundary receipts.
 
   The adapter uses a host-owned Ecto Repo and parameterized SQL. One locked
-  stream row serializes head advancement; immutable blobs and entries are
-  inserted in the same database transaction. Ledger never starts, supervises,
-  or configures the host Repo.
+  stream row serializes each checkpoint or receipt head advancement; immutable
+  objects and entries are inserted in the same database transaction. The two
+  chains have independent heads. Ledger never starts, supervises, or configures
+  the host Repo.
 
   Runtime options include:
 
@@ -15,8 +16,9 @@ defmodule Spectre.Ledger.Backend.Postgres do
     * `:query_opts` and `:transaction_opts` - optional Ecto SQL options.
 
   Write transactions fail closed unless PostgreSQL reports `READ COMMITTED`.
-  This keeps alias migration and checkpoint CAS within one visibility model;
-  hosts must not override Ledger transactions to repeatable-read or serializable.
+  This keeps alias migration, checkpoint CAS, and receipt idempotency within one
+  visibility model; hosts must not override Ledger transactions to
+  repeatable-read or serializable.
 
   Install the SQL schema with `mix spectre_ledger.gen.migration` before use.
   """
@@ -32,7 +34,12 @@ defmodule Spectre.Ledger.Backend.Postgres do
   alias Spectre.Ledger.Config
   alias Spectre.Ledger.Entry
   alias Spectre.Ledger.Receipt
+  alias Spectre.Ledger.ReceiptCodec
+  alias Spectre.Ledger.ReceiptEntry
+  alias Spectre.Ledger.ReceiptWrite
   alias Spectre.Ledger.Write
+  alias Spectre.Receipt.Envelope
+  alias Spectre.Receipt.Sink
 
   @entry_columns """
   "stream_key", "kind", "expected_revision", "revision",
@@ -46,12 +53,29 @@ defmodule Spectre.Ledger.Backend.Postgres do
   e."source_entry_digest", e."owner_fencing_token", e."entry_digest"
   """
 
+  @receipt_entry_columns """
+  "stream_key", "sequence", "receipt_id", "kind", "canonical_revision",
+  "envelope_digest", "payload_ref", "previous_entry_digest", "recorded_at",
+  "owner_fencing_token", "entry_digest"
+  """
+
+  @qualified_receipt_entry_columns """
+  r."stream_key", r."sequence", r."receipt_id", r."kind", r."canonical_revision",
+  r."envelope_digest", r."payload_ref", r."previous_entry_digest", r."recorded_at",
+  r."owner_fencing_token", r."entry_digest"
+  """
+
   @expected_columns %{
     aliases: ~w(namespace alias_stream_key target_stream_key inserted_at),
     blobs: ~w(namespace blob_digest checkpoint_digest checkpoint byte_size inserted_at),
     entries:
       ~w(namespace stream_key revision expected_revision kind checkpoint_digest blob_digest previous_entry_digest source_entry_digest owner_fencing_token entry_digest inserted_at),
     meta: ~w(key value updated_at),
+    receipt_entries:
+      ~w(namespace stream_key sequence receipt_id kind canonical_revision envelope_digest payload_ref previous_entry_digest recorded_at owner_fencing_token entry_digest inserted_at),
+    receipt_payloads: ~w(namespace payload_ref envelope_digest envelope byte_size inserted_at),
+    receipt_streams:
+      ~w(namespace stream_key head_sequence head_entry_digest inserted_at updated_at),
     streams:
       ~w(namespace stream_key head_revision head_entry_digest head_blob_digest inserted_at updated_at)
   }
@@ -214,6 +238,121 @@ defmodule Spectre.Ledger.Backend.Postgres do
   def put_stream(%Config{}, _stream_key, _entries, _blobs),
     do: {:error, :invalid_ledger_import}
 
+  @impl Spectre.Ledger.Backend
+  def append_receipt(%Config{} = config, %ReceiptWrite{} = write) do
+    with :ok <- ReceiptWrite.validate(write, config),
+         {:ok, runtime} <- Runtime.from_config(config) do
+      Runtime.transaction(runtime, fn ->
+        append_receipt!(runtime, config.namespace, write, config.max_receipt_bytes)
+      end)
+    end
+  end
+
+  @impl Spectre.Ledger.Backend
+  def lookup_receipt(%Config{} = config, receipt_id)
+      when is_binary(receipt_id) and receipt_id != "" do
+    with {:ok, runtime} <- Runtime.from_config(config),
+         {:ok, result} <-
+           Runtime.read(
+             runtime,
+             """
+             SELECT #{@qualified_receipt_entry_columns},
+                    p."envelope_digest", p."envelope", p."byte_size"
+             FROM #{Names.qualified(runtime.names, :receipt_entries)} AS r
+             JOIN #{Names.qualified(runtime.names, :receipt_payloads)} AS p
+               ON p."namespace" = r."namespace"
+              AND p."payload_ref" = r."payload_ref"
+             WHERE r."namespace" = $1 AND r."receipt_id" = $2
+             """,
+             [config.namespace, receipt_id]
+           ) do
+      decode_receipt_lookup(result.rows, receipt_id, config.max_receipt_bytes)
+    end
+  end
+
+  def lookup_receipt(%Config{}, _receipt_id), do: {:error, :invalid_ledger_receipt_id}
+
+  @impl Spectre.Ledger.Backend
+  def put_receipt_payload(%Config{} = config, %ReceiptWrite{} = write) do
+    with :ok <- ReceiptWrite.validate(write, config),
+         {:ok, runtime} <- Runtime.from_config(config) do
+      Runtime.transaction(runtime, fn ->
+        insert_receipt_payload!(runtime, config.namespace, write, config.max_receipt_bytes)
+        write.payload_ref
+      end)
+    end
+  end
+
+  @impl Spectre.Ledger.Backend
+  def get_receipt_payload(%Config{} = config, payload_ref)
+      when is_binary(payload_ref) and payload_ref != "" do
+    with {:ok, runtime} <- Runtime.from_config(config),
+         {:ok, result} <-
+           Runtime.read(
+             runtime,
+             """
+             SELECT "envelope_digest", "envelope", "byte_size"
+             FROM #{Names.qualified(runtime.names, :receipt_payloads)}
+             WHERE "namespace" = $1 AND "payload_ref" = $2
+             """,
+             [config.namespace, payload_ref]
+           ) do
+      decode_receipt_payload(result.rows, payload_ref, config.max_receipt_bytes)
+    end
+  end
+
+  def get_receipt_payload(%Config{}, _payload_ref),
+    do: {:error, :invalid_ledger_receipt_payload_ref}
+
+  @impl Spectre.Ledger.Backend
+  def receipt_entries(%Config{} = config, stream_key, opts)
+      when is_binary(stream_key) and stream_key != "" and is_list(opts) do
+    with {:ok, runtime} <- Runtime.from_config(config),
+         {:ok, after_sequence, limit} <- receipt_list_options(opts),
+         {:ok, result} <-
+           Runtime.read(
+             runtime,
+             receipt_entries_sql(runtime, limit),
+             receipt_entries_params(config.namespace, stream_key, after_sequence, limit)
+           ) do
+      decode_receipt_entries(result.rows)
+    end
+  end
+
+  def receipt_entries(%Config{}, _stream_key, _opts),
+    do: {:error, :invalid_ledger_receipt_entries_options}
+
+  @impl Spectre.Ledger.Backend
+  def receipt_objects(%Config{} = config, stream_key, opts)
+      when is_binary(stream_key) and stream_key != "" and is_list(opts) do
+    with true <- Keyword.keyword?(opts) and opts == [],
+         {:ok, runtime} <- Runtime.from_config(config),
+         {:ok, result} <-
+           Runtime.read(
+             runtime,
+             """
+             SELECT DISTINCT p."payload_ref", p."envelope_digest",
+                             p."envelope", p."byte_size"
+             FROM #{Names.qualified(runtime.names, :receipt_entries)} AS r
+             JOIN #{Names.qualified(runtime.names, :receipt_payloads)} AS p
+               ON p."namespace" = r."namespace"
+              AND p."payload_ref" = r."payload_ref"
+             WHERE r."namespace" = $1 AND r."stream_key" = $2
+             ORDER BY p."payload_ref" ASC
+             """,
+             [config.namespace, stream_key]
+           ),
+         {:ok, objects} <- decode_receipt_objects(result.rows, config.max_receipt_bytes) do
+      {:ok, objects}
+    else
+      false -> {:error, :invalid_ledger_receipt_objects_options}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def receipt_objects(%Config{}, _stream_key, _opts),
+    do: {:error, :invalid_ledger_receipt_objects_options}
+
   @doc "Performs a read-only check of the configured Ledger SQL schema."
   @spec doctor(Config.t()) :: {:ok, map()} | {:error, term()}
   def doctor(%Config{} = config) do
@@ -258,6 +397,216 @@ defmodule Spectre.Ledger.Backend.Postgres do
   end
 
   def doctor(_config), do: {:error, :invalid_ledger_config}
+
+  defp append_receipt!(runtime, namespace, write, max_bytes) do
+    insert_receipt_payload!(runtime, namespace, write, max_bytes)
+    state = ensure_and_lock_receipt_stream!(runtime, namespace, write.stream_key)
+
+    case existing_receipt_entry!(runtime, namespace, write.receipt_id) do
+      %ReceiptEntry{} = existing ->
+        replay_receipt_or_conflict!(runtime, namespace, existing, write, max_bytes)
+
+      nil ->
+        append_new_receipt!(runtime, namespace, state, write, max_bytes)
+    end
+  end
+
+  defp replay_receipt_or_conflict!(runtime, namespace, existing, write, max_bytes) do
+    if ReceiptEntry.matches_write?(existing, write) do
+      verify_receipt_payload!(
+        runtime,
+        namespace,
+        write.payload_ref,
+        write.envelope_digest,
+        max_bytes
+      )
+
+      :idempotent
+    else
+      Runtime.rollback(runtime, :ledger_receipt_id_conflict)
+    end
+  end
+
+  defp append_new_receipt!(runtime, namespace, state, write, max_bytes) do
+    {:ok, entry} = ReceiptEntry.new(write, state.sequence + 1, state.entry_digest)
+
+    case insert_receipt_entry!(runtime, namespace, entry) do
+      :inserted ->
+        advance_receipt_head!(runtime, namespace, state, entry)
+        :appended
+
+      :conflict ->
+        case existing_receipt_entry!(runtime, namespace, write.receipt_id) do
+          %ReceiptEntry{} = existing ->
+            replay_receipt_or_conflict!(runtime, namespace, existing, write, max_bytes)
+
+          nil ->
+            Runtime.rollback(runtime, :ledger_receipt_entry_conflict)
+        end
+    end
+  end
+
+  defp insert_receipt_payload!(runtime, namespace, write, max_bytes) do
+    Runtime.query!(
+      runtime,
+      """
+      INSERT INTO #{Names.qualified(runtime.names, :receipt_payloads)}
+        ("namespace", "payload_ref", "envelope_digest", "envelope", "byte_size")
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT ("namespace", "payload_ref") DO NOTHING
+      """,
+      [namespace, write.payload_ref, write.envelope_digest, write.encoded, write.byte_size]
+    )
+
+    verify_receipt_payload!(
+      runtime,
+      namespace,
+      write.payload_ref,
+      write.envelope_digest,
+      max_bytes
+    )
+  end
+
+  defp verify_receipt_payload!(runtime, namespace, payload_ref, envelope_digest, max_bytes) do
+    result =
+      Runtime.query!(
+        runtime,
+        """
+        SELECT "envelope_digest", "envelope", "byte_size"
+        FROM #{Names.qualified(runtime.names, :receipt_payloads)}
+        WHERE "namespace" = $1 AND "payload_ref" = $2
+        """,
+        [namespace, payload_ref]
+      )
+
+    case result.rows do
+      [[^envelope_digest, _encoded, _byte_size]] ->
+        case decode_receipt_payload(result.rows, payload_ref, max_bytes) do
+          {:ok, _encoded} -> :ok
+          {:error, reason} -> Runtime.rollback(runtime, reason)
+        end
+
+      [[_different_digest, _encoded, _byte_size]] ->
+        Runtime.rollback(runtime, :ledger_receipt_payload_digest_collision)
+
+      [] ->
+        Runtime.rollback(runtime, :ledger_receipt_payload_not_found)
+
+      _rows ->
+        Runtime.rollback(runtime, :invalid_ledger_postgres_receipt_payload_result)
+    end
+  end
+
+  defp ensure_and_lock_receipt_stream!(runtime, namespace, stream_key) do
+    Runtime.query!(
+      runtime,
+      """
+      INSERT INTO #{Names.qualified(runtime.names, :receipt_streams)}
+        ("namespace", "stream_key")
+      VALUES ($1, $2)
+      ON CONFLICT ("namespace", "stream_key") DO NOTHING
+      """,
+      [namespace, stream_key]
+    )
+
+    result =
+      Runtime.query!(
+        runtime,
+        """
+        SELECT "head_sequence", "head_entry_digest"
+        FROM #{Names.qualified(runtime.names, :receipt_streams)}
+        WHERE "namespace" = $1 AND "stream_key" = $2
+        FOR UPDATE
+        """,
+        [namespace, stream_key]
+      )
+
+    case result.rows do
+      [[sequence, entry_digest]] -> %{sequence: sequence, entry_digest: entry_digest}
+      [] -> Runtime.rollback(runtime, :ledger_receipt_stream_not_found)
+      _rows -> Runtime.rollback(runtime, :invalid_ledger_postgres_receipt_stream)
+    end
+  end
+
+  defp existing_receipt_entry!(runtime, namespace, receipt_id) do
+    result =
+      Runtime.query!(
+        runtime,
+        """
+        SELECT #{@receipt_entry_columns}
+        FROM #{Names.qualified(runtime.names, :receipt_entries)} AS r
+        WHERE r."namespace" = $1 AND r."receipt_id" = $2
+        """,
+        [namespace, receipt_id]
+      )
+
+    case result.rows do
+      [row] -> decode_receipt_entry!(runtime, row)
+      [] -> nil
+      _rows -> Runtime.rollback(runtime, :invalid_ledger_postgres_receipt_entry)
+    end
+  end
+
+  defp insert_receipt_entry!(runtime, namespace, entry) do
+    result =
+      Runtime.query!(
+        runtime,
+        """
+        INSERT INTO #{Names.qualified(runtime.names, :receipt_entries)}
+          ("namespace", "stream_key", "sequence", "receipt_id", "kind",
+           "canonical_revision", "envelope_digest", "payload_ref",
+           "previous_entry_digest", "recorded_at", "owner_fencing_token", "entry_digest")
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT DO NOTHING
+        """,
+        [
+          namespace,
+          entry.stream_key,
+          entry.sequence,
+          entry.receipt_id,
+          Atom.to_string(entry.kind),
+          entry.canonical_revision,
+          entry.envelope_digest,
+          entry.payload_ref,
+          entry.previous_entry_digest,
+          entry.recorded_at,
+          entry.owner_fencing_token,
+          entry.entry_digest
+        ]
+      )
+
+    case result.num_rows do
+      1 -> :inserted
+      0 -> :conflict
+      _count -> Runtime.rollback(runtime, :invalid_ledger_postgres_receipt_insert)
+    end
+  end
+
+  defp advance_receipt_head!(runtime, namespace, state, entry) do
+    result =
+      Runtime.query!(
+        runtime,
+        """
+        UPDATE #{Names.qualified(runtime.names, :receipt_streams)}
+        SET "head_sequence" = $3, "head_entry_digest" = $4,
+            "updated_at" = transaction_timestamp()
+        WHERE "namespace" = $1 AND "stream_key" = $2
+          AND "head_sequence" = $5
+          AND "head_entry_digest" IS NOT DISTINCT FROM $6
+        """,
+        [
+          namespace,
+          entry.stream_key,
+          entry.sequence,
+          entry.entry_digest,
+          state.sequence,
+          state.entry_digest
+        ]
+      )
+
+    if result.num_rows != 1,
+      do: Runtime.rollback(runtime, :ledger_receipt_head_conflict)
+  end
 
   defp compare_and_swap!(runtime, namespace, write) do
     state = ensure_and_lock_stream!(runtime, namespace, write.ref.key)
@@ -916,6 +1265,128 @@ defmodule Spectre.Ledger.Backend.Postgres do
     end
   end
 
+  defp decode_receipt_entries(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, entries} ->
+      case decode_receipt_entry(row) do
+        {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_receipt_entry!(runtime, row) do
+    case decode_receipt_entry(row) do
+      {:ok, entry} -> entry
+      {:error, reason} -> Runtime.rollback(runtime, reason)
+    end
+  end
+
+  defp decode_receipt_entry([
+         stream_key,
+         sequence,
+         receipt_id,
+         kind,
+         canonical_revision,
+         envelope_digest,
+         payload_ref,
+         previous_entry_digest,
+         recorded_at,
+         owner_fencing_token,
+         entry_digest
+       ]) do
+    ReceiptEntry.from_data(%{
+      "format" => "spectre/ledger-receipt-entry",
+      "entry_version" => ReceiptEntry.version(),
+      "stream_key" => stream_key,
+      "sequence" => sequence,
+      "receipt_id" => receipt_id,
+      "kind" => kind,
+      "canonical_revision" => canonical_revision,
+      "envelope_digest" => envelope_digest,
+      "payload_ref" => payload_ref,
+      "previous_entry_digest" => previous_entry_digest,
+      "recorded_at" => recorded_at,
+      "owner_fencing_token" => owner_fencing_token,
+      "entry_digest" => entry_digest
+    })
+  end
+
+  defp decode_receipt_entry(_row), do: {:error, :invalid_ledger_postgres_receipt_entry}
+
+  defp decode_receipt_lookup(rows, receipt_id, max_bytes) do
+    case rows do
+      [row] when is_list(row) and length(row) == 14 ->
+        {entry_data, [envelope_digest, encoded, byte_size]} = Enum.split(row, 11)
+
+        with {:ok, %ReceiptEntry{receipt_id: ^receipt_id} = entry} <-
+               decode_receipt_entry(entry_data),
+             {:ok, ^encoded} <-
+               decode_receipt_payload(
+                 [[envelope_digest, encoded, byte_size]],
+                 entry.payload_ref,
+                 max_bytes
+               ),
+             {:ok, envelope} <-
+               ReceiptCodec.verify(encoded, entry.receipt_id, entry.envelope_digest, max_bytes),
+             :ok <- ReceiptEntry.verify_envelope(entry, envelope) do
+          {:ok, encoded}
+        else
+          {:ok, %ReceiptEntry{}} -> {:error, :ledger_receipt_lookup_id_mismatch}
+          {:error, _reason} = error -> error
+          _invalid -> {:error, :invalid_ledger_postgres_receipt}
+        end
+
+      [] ->
+        :not_found
+
+      _rows ->
+        {:error, :invalid_ledger_postgres_receipt_lookup_result}
+    end
+  end
+
+  defp decode_receipt_payload(rows, payload_ref, max_bytes) do
+    case rows do
+      [[envelope_digest, encoded, byte_size]] ->
+        with true <- is_binary(encoded) and byte_size(encoded) == byte_size,
+             {:ok, envelope} <- ReceiptCodec.decode(encoded, max_bytes),
+             true <- Envelope.digest(envelope) == envelope_digest,
+             true <- Sink.payload_ref(envelope) == payload_ref do
+          {:ok, encoded}
+        else
+          false -> {:error, :invalid_ledger_postgres_receipt_payload}
+          {:error, _reason} = error -> error
+        end
+
+      [] ->
+        :not_found
+
+      _rows ->
+        {:error, :invalid_ledger_postgres_receipt_payload_result}
+    end
+  end
+
+  defp decode_receipt_objects(rows, max_bytes) do
+    Enum.reduce_while(rows, {:ok, %{}}, fn
+      [payload_ref, envelope_digest, encoded, byte_size], {:ok, objects} ->
+        case decode_receipt_payload(
+               [[envelope_digest, encoded, byte_size]],
+               payload_ref,
+               max_bytes
+             ) do
+          {:ok, ^encoded} -> {:cont, {:ok, Map.put(objects, payload_ref, encoded)}}
+          {:error, _reason} = error -> {:halt, error}
+          :not_found -> {:halt, {:error, :ledger_receipt_payload_not_found}}
+        end
+
+      _row, {:ok, _objects} ->
+        {:halt, {:error, :invalid_ledger_postgres_receipt_object}}
+    end)
+  end
+
   defp decode_entry!(runtime, row) do
     case decode_entry(row) do
       {:ok, entry} -> entry
@@ -990,6 +1461,52 @@ defmodule Spectre.Ledger.Backend.Postgres do
 
   defp entries_params(namespace, stream_key, after_revision, limit),
     do: [namespace, stream_key, after_revision, limit]
+
+  defp receipt_entries_sql(runtime, nil) do
+    """
+    SELECT #{@receipt_entry_columns}
+    FROM #{Names.qualified(runtime.names, :receipt_entries)} AS r
+    WHERE r."namespace" = $1 AND r."stream_key" = $2 AND r."sequence" > $3
+    ORDER BY r."sequence" ASC
+    """
+  end
+
+  defp receipt_entries_sql(runtime, _limit) do
+    receipt_entries_sql(runtime, nil) <> " LIMIT $4"
+  end
+
+  defp receipt_entries_params(namespace, stream_key, after_sequence, nil),
+    do: [namespace, stream_key, after_sequence]
+
+  defp receipt_entries_params(namespace, stream_key, after_sequence, limit),
+    do: [namespace, stream_key, after_sequence, limit]
+
+  defp receipt_list_options(opts) do
+    if Keyword.keyword?(opts),
+      do: keyword_receipt_list_options(opts),
+      else: {:error, :invalid_ledger_receipt_entries_options}
+  end
+
+  defp keyword_receipt_list_options(opts) do
+    after_sequence = Keyword.get(opts, :after_sequence, 0)
+    limit = Keyword.get(opts, :limit)
+    keys = Keyword.keys(opts)
+
+    cond do
+      length(keys) != length(Enum.uniq(keys)) or
+          Enum.any?(keys, &(&1 not in [:after_sequence, :limit])) ->
+        {:error, :invalid_ledger_receipt_entries_options}
+
+      not (is_integer(after_sequence) and after_sequence >= 0) ->
+        {:error, :invalid_ledger_receipt_after_sequence}
+
+      invalid_limit?(limit) ->
+        {:error, :invalid_ledger_receipt_entry_limit}
+
+      true ->
+        {:ok, after_sequence, limit}
+    end
+  end
 
   defp list_options(opts) do
     if Keyword.keyword?(opts),

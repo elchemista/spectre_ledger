@@ -12,13 +12,24 @@ defmodule Spectre.Ledger.Backend.Postgres.Names do
     blobs: "blobs",
     entries: "entries",
     meta: "meta",
+    receipt_entries: "receipt_entries",
+    receipt_payloads: "receipt_payloads",
+    receipt_streams: "receipt_streams",
     streams: "streams"
   }
 
   @enforce_keys [:schema, :table_prefix, :tables]
   defstruct [:schema, :table_prefix, :tables]
 
-  @type table :: :aliases | :blobs | :entries | :meta | :streams
+  @type table ::
+          :aliases
+          | :blobs
+          | :entries
+          | :meta
+          | :receipt_entries
+          | :receipt_payloads
+          | :receipt_streams
+          | :streams
   @type t :: %__MODULE__{
           schema: String.t(),
           table_prefix: String.t(),

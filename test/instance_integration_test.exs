@@ -36,8 +36,10 @@ defmodule SpectreLedger.InstanceIntegrationTest do
     subject = Subject.new("ledger-restart-#{System.unique_integer([:positive, :monotonic])}")
     namespace = "instance-restart"
 
-    store =
-      Spectre.Ledger.checkpoint_store(backend: :memory, server: server, namespace: namespace)
+    ledger_opts = [backend: :memory, server: server, namespace: namespace]
+
+    store = Spectre.Ledger.checkpoint_store(ledger_opts)
+    receipt_sink = Spectre.Ledger.receipt_sink(ledger_opts)
 
     ref = Ref.new(AgentRef.new(@agent), subject)
 
@@ -47,6 +49,8 @@ defmodule SpectreLedger.InstanceIntegrationTest do
                subject: subject,
                checkpoint_store: store,
                checkpoint_mode: :manual,
+               receipt_mode: :required,
+               receipt_sink: receipt_sink,
                idle: false
              )
 
@@ -58,6 +62,10 @@ defmodule SpectreLedger.InstanceIntegrationTest do
 
     assert first_revision > 0
 
+    assert_eventually(fn ->
+      match?({:ok, [_first | _rest]}, Spectre.Ledger.receipts(ref, ledger_opts))
+    end)
+
     assert :ok = GenServer.stop(first_instance, :normal)
 
     assert {:ok, restored_instance} =
@@ -66,6 +74,8 @@ defmodule SpectreLedger.InstanceIntegrationTest do
                subject: subject,
                checkpoint_store: store,
                checkpoint_mode: :manual,
+               receipt_mode: :required,
+               receipt_sink: receipt_sink,
                idle: false
              )
 
@@ -100,6 +110,16 @@ defmodule SpectreLedger.InstanceIntegrationTest do
              Chain.verify(entries)
 
     assert entry_count >= 2
+
+    assert {:ok, receipts} = Spectre.Ledger.receipts(ref, ledger_opts)
+    assert length(receipts) >= 2
+    assert Enum.any?(receipts, &(&1.kind == :run_input_admitted))
+
+    assert {:ok, receipt_report} = Spectre.Ledger.verify_receipts(ref, ledger_opts)
+    assert receipt_report.entry_count == length(receipts)
+    assert receipt_report.object_count == length(receipts)
+    assert receipt_report.state_digest_linkage
+    refute receipt_report.deterministic_replay_claim
   end
 
   defp flush_current(instance, attempts \\ 5)
@@ -113,6 +133,19 @@ defmodule SpectreLedger.InstanceIntegrationTest do
       if report.revision == persisted_revision,
         do: {:ok, persisted_revision, checkpoint, report},
         else: flush_current(instance, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(fun, attempts \\ 100)
+
+  defp assert_eventually(_fun, 0), do: flunk("condition did not become true")
+
+  defp assert_eventually(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      assert_eventually(fun, attempts - 1)
     end
   end
 end

@@ -1,14 +1,16 @@
 defmodule Spectre.Ledger.Backend.Conformance do
   @moduledoc """
-  ExUnit-independent contract suite for complete Ledger backends.
+  ExUnit-independent contract suite for Ledger checkpoint backends.
 
   The runner first delegates checkpoint semantics and the concurrent CAS race
   to `Spectre.Instance.CheckpointStore.Conformance`. It then verifies the
   Ledger archive surface: ordered chain, immutable object set, deterministic
   bundle, import into an isolated namespace, exact retry, and readback.
 
-  A run writes both its supplied Ref and a derived import namespace. Callers
-  must supply a fresh Ref and caller-owned backend resources.
+  Receipt support is a separate optional capability verified by
+  `Spectre.Ledger.ReceiptBackend.Conformance`. A run writes both its supplied
+  Ref and a derived import namespace. Callers must supply a fresh Ref and
+  caller-owned backend resources.
   """
 
   alias Spectre.Instance.CheckpointStore.Conformance, as: CoreConformance

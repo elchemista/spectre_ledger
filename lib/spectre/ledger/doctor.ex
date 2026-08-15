@@ -10,6 +10,7 @@ defmodule Spectre.Ledger.Doctor do
   read-only `doctor/1` result shape; Doctor never calls its storage callbacks.
   """
 
+  alias Spectre.Ledger.Backend.Capabilities
   alias Spectre.Ledger.Backend.Memory
   alias Spectre.Ledger.Backend.Postgres
   alias Spectre.Ledger.Bundle
@@ -43,7 +44,8 @@ defmodule Spectre.Ledger.Doctor do
         checks = [
           safe("ledger.package", &package_check/0),
           safe("ledger.bundle", &bundle_check/0),
-          safe("ledger.backend", fn -> backend_check(config) end)
+          safe("ledger.backend", fn -> backend_check(config) end),
+          safe("ledger.receipts", fn -> receipt_capability_check(config.backend) end)
         ]
 
         {:ok, report(core, checks)}
@@ -138,6 +140,39 @@ defmodule Spectre.Ledger.Doctor do
       :ok -> backend_diagnostic(config)
       {:error, code} -> check(:error, "ledger.backend", code)
     end
+  end
+
+  defp receipt_capability_check(backend) do
+    cond do
+      not Code.ensure_loaded?(backend) ->
+        check(:skipped, "ledger.receipts", :receipt_backend_not_loaded)
+
+      receipt_capability_absent?(backend) ->
+        check(:skipped, "ledger.receipts", :receipt_backend_not_configured, %{
+          backend: inspect(backend)
+        })
+
+      Capabilities.complete?(backend, :receipt_sink) and
+          Capabilities.complete?(backend, :receipt_archive) ->
+        check(:ok, "ledger.receipts", :receipt_backend_callbacks_valid, %{
+          backend: inspect(backend),
+          sink: true,
+          archive: true
+        })
+
+      true ->
+        check(:error, "ledger.receipts", :receipt_backend_callbacks_incomplete, %{
+          backend: inspect(backend),
+          sink: Capabilities.complete?(backend, :receipt_sink),
+          archive: Capabilities.complete?(backend, :receipt_archive)
+        })
+    end
+  end
+
+  defp receipt_capability_absent?(backend) do
+    [:receipt_sink, :receipt_archive]
+    |> Enum.flat_map(&Capabilities.callbacks/1)
+    |> Enum.all?(fn {function, arity} -> not function_exported?(backend, function, arity) end)
   end
 
   defp backend_diagnostic(%Config{backend: Memory} = config) do
