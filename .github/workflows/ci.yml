@@ -37,6 +37,9 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
+      - name: Add PostgreSQL tools to PATH
+        run: printf '%s\n' "$(pg_config --bindir)" >>"$GITHUB_PATH"
+
       - name: Install dependencies
         run: mix deps.get
 
