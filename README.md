@@ -1,7 +1,7 @@
 # Spectre Ledger
 
-Spectre Ledger 0.1.0 is an append-only durable checkpoint and boundary-receipt
-ledger for Spectre 0.3.2. It implements two existing core boundaries:
+Spectre Ledger is an append-only durable checkpoint and boundary-receipt ledger
+for Spectre. It implements two existing core boundaries:
 `Spectre.Instance.CheckpointStore` and `Spectre.Receipt.Sink`. Spectre remains
 the only runtime owner, scheduler, receipt-outbox owner, and recovery authority.
 
@@ -21,9 +21,9 @@ def deps do
 end
 ```
 
-Ledger is currently version `0.1.0` and is consumed from GitHub; it has not been
-published to Hex. PostgreSQL storage schema version `2` is an independent
-internal schema number, not a package release number.
+Ledger is consumed from GitHub and has not been published to Hex. PostgreSQL
+storage schema version `2` is an independent internal schema number, not a
+package release number.
 
 The PostgreSQL adapter is optional. Consumers using only Memory or bundle
 verification do not pull Ecto SQL or Postgrex transitively. Applications that
