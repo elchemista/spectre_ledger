@@ -79,9 +79,10 @@ defmodule Spectre.Ledger.ReceiptCodec do
   end
 
   defp exact_fields(data) when is_map(data) and not is_struct(data) do
-    if MapSet.new(Map.keys(data)) == MapSet.new(@field_names),
-      do: :ok,
-      else: {:error, :invalid_ledger_receipt_fields}
+    if map_size(data) == length(@field_names) and
+         Enum.all?(@field_names, &Map.has_key?(data, &1)),
+       do: :ok,
+       else: {:error, :invalid_ledger_receipt_fields}
   end
 
   defp exact_fields(_data), do: {:error, :invalid_ledger_receipt_fields}
