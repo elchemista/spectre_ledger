@@ -390,8 +390,15 @@ defmodule SpectreLedger.MemoryBackendTest do
     invalid_ref = %{ref | key: ""}
     assert {:error, :invalid_ledger_stream_key} = Memory.load(config, invalid_ref)
 
-    dead_server = spawn(fn -> :ok end)
+    dead_server =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
     monitor = Process.monitor(dead_server)
+    send(dead_server, :stop)
     assert_receive {:DOWN, ^monitor, :process, ^dead_server, :normal}
 
     assert {:error, :invalid_memory_server} =
