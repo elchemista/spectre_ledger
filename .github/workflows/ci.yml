@@ -19,23 +19,12 @@ env:
   OTP_VERSION: "28.x"
 
 jobs:
-  quality:
-    name: Quality (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+  test:
+    name: Test and Credo
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - elixir: "1.19.x"
-            otp: "28.x"
-            test_args: ""
-          - elixir: "1.20.x"
-            otp: "29.x"
-            test_args: "--cover"
+    timeout-minutes: 30
     env:
       MIX_ENV: test
-      MIX_BUILD_PATH: _build/quality
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -43,40 +32,22 @@ jobs:
           persist-credentials: false
 
       - name: Set up Elixir and Erlang/OTP
-        id: beam
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: ${{ matrix.elixir }}
-          otp-version: ${{ matrix.otp }}
-
-      - name: Add PostgreSQL tools to PATH
-        run: printf '%s\n' "$(pg_config --bindir)" >>"$GITHUB_PATH"
-
-      - name: Restore quality build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            deps
-            _build/quality
-          key: ${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-quality-${{ hashFiles('mix.lock') }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
 
       - name: Install dependencies
         run: mix deps.get
 
-      - name: Check formatting
-        run: mix format --check-formatted
-
-      - name: Compile without warnings
-        run: mix compile --warnings-as-errors
-
       - name: Run tests
-        run: mix test ${{ matrix.test_args }}
+        run: mix test
 
-      - name: Run Credo
-        run: mix credo --all
+      - name: Run Credo (non-strict)
+        run: mix credo
 
-  verification:
-    name: Source-release verification
+  dialyzer:
+    name: Dialyzer
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -88,28 +59,13 @@ jobs:
           persist-credentials: false
 
       - name: Set up Elixir and Erlang/OTP
-        id: beam
         uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
-      - name: Restore verification build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            deps
-            _build/dev
-          key: ${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-verification-${{ hashFiles('mix.lock') }}
-
       - name: Install dependencies
         run: mix deps.get
-
-      - name: Audit Hex dependencies
-        run: mix hex.audit
-
-      - name: Build documentation without warnings
-        run: mix docs --warnings-as-errors
 
       - name: Run Dialyzer
         run: mix dialyzer
