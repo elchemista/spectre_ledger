@@ -37,6 +37,13 @@ defmodule SpectreLedger.PublicApiManifestTest do
 
   defp application_modules do
     assert {:ok, modules} = :application.get_key(:spectre_ledger, :modules)
+
+    # `function_exported?/3` never loads a module, so the compiled contract has
+    # to be read from modules the code server already holds. Test files load in
+    # parallel with the async run, so nothing guarantees another case loaded
+    # them first.
+    Enum.each(modules, &Code.ensure_loaded!/1)
+
     Map.new(modules, &{inspect(&1), &1})
   end
 
