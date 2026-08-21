@@ -36,6 +36,7 @@ defmodule Spectre.Ledger do
   alias Spectre.Ledger.Bundle
   alias Spectre.Ledger.Chain
   alias Spectre.Ledger.Config
+  alias Spectre.Ledger.InferenceUsage
   alias Spectre.Ledger.ReceiptChain
   alias Spectre.Ledger.ReceiptCodec
   alias Spectre.Ledger.ReceiptEntry
@@ -103,6 +104,23 @@ defmodule Spectre.Ledger do
            ),
          {:ok, objects} <- config.backend.receipt_objects(config, stream_key, []) do
       decode_receipts(entries, objects, config.max_receipt_bytes)
+    end
+  end
+
+  @doc """
+  Aggregates inference calls and cumulative token usage from a complete receipt stream.
+
+  The projection joins `:inference_selected` and
+  `:inference_attempt_terminal` evidence. Pagination options are rejected so
+  the result cannot accidentally be presented as a complete total.
+  """
+  @spec inference_usage(Ref.t() | String.t(), keyword()) ::
+          {:ok, InferenceUsage.summary()} | {:error, term()}
+  def inference_usage(ref_or_key, opts \\ []) do
+    with :ok <- complete_receipt_options(opts),
+         {:ok, _verification} <- verify_receipts(ref_or_key, opts),
+         {:ok, envelopes} <- receipts(ref_or_key, opts) do
+      InferenceUsage.summarize(envelopes)
     end
   end
 

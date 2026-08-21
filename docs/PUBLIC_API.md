@@ -26,7 +26,7 @@ application's compiled BEAM surface.
 - `Mix.Tasks.SpectreLedger.Doctor`
 - `Mix.Tasks.SpectreLedger.Gen.Migration`
 - `Spectre.Ledger`
-  - functions: `version/0`, `checkpoint_store/0`, `checkpoint_store/1`, `receipt_sink/0`, `receipt_sink/1`, `receipt/1`, `receipt/2`, `receipt_payload/1`, `receipt_payload/2`, `receipt_entries/1`, `receipt_entries/2`, `receipts/1`, `receipts/2`, `verify_receipts/1`, `verify_receipts/2`, `head/1`, `head/2`, `entries/1`, `entries/2`, `verify/1`, `verify/2`, `export_bundle/1`, `export_bundle/2`, `import_bundle/1`, `import_bundle/2`
+  - functions: `version/0`, `checkpoint_store/0`, `checkpoint_store/1`, `receipt_sink/0`, `receipt_sink/1`, `receipt/1`, `receipt/2`, `receipt_payload/1`, `receipt_payload/2`, `receipt_entries/1`, `receipt_entries/2`, `receipts/1`, `receipts/2`, `inference_usage/1`, `inference_usage/2`, `verify_receipts/1`, `verify_receipts/2`, `head/1`, `head/2`, `entries/1`, `entries/2`, `verify/1`, `verify/2`, `export_bundle/1`, `export_bundle/2`, `import_bundle/1`, `import_bundle/2`
 - `Spectre.Ledger.Backend`
   - callbacks: `load/2`, `compare_and_swap/2`, `head/2`, `entries/3`, `objects/3`, `migrate/5`, `put_stream/4`, `append_receipt/2`, `lookup_receipt/2`, `put_receipt_payload/2`, `get_receipt_payload/2`, `receipt_entries/3`, `receipt_objects/3`
 - `Spectre.Ledger.Backend.Conformance`
@@ -53,6 +53,8 @@ application's compiled BEAM surface.
 - `Spectre.Ledger.Entry`
   - functions: `version/0`, `new/2`, `to_data/1`, `from_data/1`, `verify/1`
 - `Spectre.Ledger.Receipt`
+- `Spectre.Ledger.InferenceUsage`
+  - functions: `summarize/1`
 - `Spectre.Ledger.ReceiptBackend.Conformance`
   - functions: `run/2`
 - `Spectre.Ledger.ReceiptChain`
