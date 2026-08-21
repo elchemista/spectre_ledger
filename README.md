@@ -91,6 +91,23 @@ its separate `canonical_revision`, because asynchronous observational delivery
 may arrive out of canonical order. Verification reports that distinction
 instead of silently reordering evidence.
 
+Aggregate model calls and cumulative usage from one complete Instance receipt
+stream without changing Ledger's append-only storage contract:
+
+```elixir
+{:ok, usage} = Spectre.Ledger.inference_usage(instance_ref, ledger_opts)
+
+usage.provider_calls
+usage.usage.total_tokens
+usage.models
+```
+
+The projection joins `:inference_selected` and
+`:inference_attempt_terminal` receipts by durable attempt identity. It counts
+only attempts with `provider_started: true` as provider calls, includes usage
+from completed and failed attempts, and keeps `:provider`, `:estimated`, and
+`:unavailable` quality counts explicit.
+
 ## PostgreSQL
 
 For production, use `backend: :postgres` with a host-owned, already running
