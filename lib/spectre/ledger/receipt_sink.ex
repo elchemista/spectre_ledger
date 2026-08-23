@@ -3,7 +3,7 @@ defmodule Spectre.Ledger.ReceiptSink do
   Durable `Spectre.Receipt.Sink` backed by a Ledger backend.
 
   The adapter stores canonical envelope bytes under the content address
-  required by Spectre 0.3.2, then appends an immutable per-Instance Ledger
+  required by Spectre 0.3.3, then appends an immutable per-Instance Ledger
   entry. Exact retries are idempotent; a divergent id or payload address fails
   closed. Runtime handles remain in backend options and are never persisted.
   """

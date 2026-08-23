@@ -653,12 +653,11 @@ defmodule SpectreLedger.PostgresBackendTest do
                "--table-prefix",
                @table_prefix,
                "--namespace",
-               "doctor-task",
-               "--strict"
+               "doctor-task"
              ])
 
     assert_received {:mix_shell, :info, [output]}
-    assert IO.iodata_to_binary(output) =~ "Spectre Ledger doctor 0.1.0: ok"
+    assert IO.iodata_to_binary(output) =~ "Spectre Ledger doctor 0.1.0: warning"
   end
 
   defp persist(opts, ref, checkpoint, expected, revision) do

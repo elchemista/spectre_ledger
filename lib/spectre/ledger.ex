@@ -1,6 +1,6 @@
 defmodule Spectre.Ledger do
   @moduledoc """
-  Append-only durable checkpoint and boundary-receipt ledger for Spectre 0.3.2.
+  Append-only durable checkpoint and boundary-receipt ledger for Spectre 0.3.3.
 
   Ledger implements `Spectre.Instance.CheckpointStore` and
   `Spectre.Receipt.Sink`. It archives checkpoints that Spectre persists and
@@ -12,7 +12,7 @@ defmodule Spectre.Ledger do
     id: :spectre_ledger,
     version: "0.1.0",
     contract: 1,
-    spectre: "~> 0.3.2",
+    spectre: "~> 0.3.3",
     provides: [
       {:contract, {:spectre, :instance_checkpoint_store, 1}},
       {:contract, {:spectre, :receipt_sink, 1}},

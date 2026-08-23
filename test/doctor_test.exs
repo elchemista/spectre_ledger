@@ -56,9 +56,9 @@ defmodule SpectreLedger.DoctorTest do
              Doctor.run(backend: :memory, server: server, namespace: "doctor-memory")
 
     assert report.status == :warning
-    assert report.core.status == :ok
+    assert report.core.status == :warning
     assert report.summary.total == report.core.summary.total + 4
-    assert report.summary.warnings == 1
+    assert report.summary.warnings == 2
 
     assert %{status: :warning, code: :memory_backend_volatile, details: details} =
              Enum.find(report.checks, &(&1.id == "ledger.backend"))
@@ -72,8 +72,8 @@ defmodule SpectreLedger.DoctorTest do
 
     assert %{
              "status" => "warning",
-             "summary" => %{"warnings" => 1},
-             "core" => %{"spectre_version" => "0.3.2"}
+             "summary" => %{"warnings" => 2},
+             "core" => %{"spectre_version" => "0.3.3"}
            } = report |> Report.format(:json) |> Jason.decode!()
 
     assert Report.format(report, :text) =~ "Spectre Ledger doctor 0.1.0: warning"
@@ -87,7 +87,10 @@ defmodule SpectreLedger.DoctorTest do
 
   test "custom backend diagnostics are callback-only and perform no backend I/O" do
     assert {:ok, report} = Doctor.run(backend: SpectreLedger.DoctorTest.ReadOnlyBackend)
-    assert report.status == :ok
+    assert report.status == :warning
+
+    assert %{status: :warning, code: :checkpoint_erasure_unsupported} =
+             Enum.find(report.core.checks, &(&1.id == "privacy.checkpoint_erasure"))
 
     assert %{status: :ok, code: :custom_backend_callbacks_valid} =
              Enum.find(report.checks, &(&1.id == "ledger.backend"))

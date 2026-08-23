@@ -15,7 +15,7 @@ execution replay, or make model calls and external effects exactly once.
 ```elixir
 def deps do
   [
-    {:spectre, "~> 0.3.2"},
+    {:spectre, "~> 0.3.3"},
     {:spectre_ledger, github: "elchemista/spectre_ledger", branch: "main"}
   ]
 end
