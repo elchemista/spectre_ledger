@@ -1,8 +1,9 @@
 defmodule Spectre.Ledger do
   @moduledoc """
-  Append-only durable checkpoint and boundary-receipt ledger for Spectre 0.3.3.
+  Append-only storage for Spectre 0.4 AgentServer coordination and legacy receipts.
 
-  Ledger implements `Spectre.Instance.CheckpointStore` and
+  `Spectre.Ledger.ServerStore` implements the revisioned AgentServer store port.
+  The legacy archive also implements `Spectre.Instance.CheckpointStore` and
   `Spectre.Receipt.Sink`. It archives checkpoints that Spectre persists and
   boundary receipts that Spectre emits; it does not claim every runtime
   revision, deterministic replay, or exactly-once side effects.
@@ -12,7 +13,8 @@ defmodule Spectre.Ledger do
     id: :spectre_ledger,
     version: "0.1.0",
     contract: 1,
-    spectre: "~> 0.3.3",
+    spectre: "~> 0.4.0",
+    resources: [{:spectre_ledger, :server_store}],
     provides: [
       {:contract, {:spectre, :instance_checkpoint_store, 1}},
       {:contract, {:spectre, :receipt_sink, 1}},
@@ -43,6 +45,22 @@ defmodule Spectre.Ledger do
   alias Spectre.Ledger.ReceiptSink
 
   @version "0.1.0"
+
+  @impl Spectre.Stack.Installable
+  def tools(config), do: Spectre.Ledger.ServerTool.tools(config)
+
+  @impl Spectre.Stack.Installable
+  def child_specs(installation, runtime_opts) do
+    opts =
+      Keyword.get(runtime_opts, :server_store, Keyword.get(installation.config, :server_store))
+
+    if opts,
+      do: [{{:spectre_ledger, :server_store}, {Spectre.Ledger.ServerStore, opts}}],
+      else: []
+  end
+
+  @doc "Builds the AgentServer coordination-store binding; distinct from legacy Instance storage."
+  def server_checkpoint_store(store, key), do: {Spectre.Ledger.ServerStore, store, key}
 
   @doc "Returns the Ledger package version."
   @spec version() :: String.t()

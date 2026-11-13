@@ -33,18 +33,18 @@ defmodule SpectreLedger.PackageContractTest do
   alias Spectre.Stack.Installable
   alias Spectre.Subject
 
-  test "package manifest conforms against Spectre 0.3.3" do
+  test "package manifest conforms against Spectre 0.4.0" do
     assert {:ok, package} = Installable.verify(Spectre.Ledger)
     assert package.id == :spectre_ledger
     assert package.version == "0.1.0"
-    assert package.spectre == "~> 0.3.3"
+    assert package.spectre == "~> 0.4.0"
     assert package.agent_extensions == []
     assert package.operations == []
     assert package.actions == []
-    assert package.resources == []
+    assert package.resources == [{:spectre_ledger, :server_store}]
 
     assert {:ok, report} = StackConformance.run([Spectre.Ledger])
-    assert report.core_version == "0.3.3"
+    assert report.core_version == "0.4.0"
     assert report.package_count == 1
   end
 

@@ -45,7 +45,7 @@ defmodule SpectreLedger.MixProject do
         {:spectre, path: Path.expand(path, __DIR__), override: true}
 
       _other ->
-        {:spectre, "~> 0.3.3"}
+        {:spectre, "~> 0.4.0"}
     end
   end
 

@@ -15,7 +15,7 @@ execution replay, or make model calls and external effects exactly once.
 ```elixir
 def deps do
   [
-    {:spectre, "~> 0.3.3"},
+    {:spectre, "~> 0.4.0"},
     {:spectre_ledger, github: "elchemista/spectre_ledger", branch: "main"}
   ]
 end
@@ -184,3 +184,30 @@ artifact before use. See [SECURITY.md](SECURITY.md).
 ## License
 
 Apache-2.0. See the repository `LICENSE` file.
+
+## AgentServer / Spectre 0.4
+
+This branch implements the optional `Spectre.Stack.Installable.tools/1`
+registration contract. Install the package in the Agent's Stack and use
+`use Spectre.Server, tools: MyApp.AI` in the separate Server module. The core
+creates helpers; this package does not export functions to import into the
+Server. Tool results arrive through `on_result` after durable acquisition.
+
+`Spectre.Ledger.ServerStore` is an append-only, synced local coordination log
+implementing `Spectre.Server.Store`. Start it under supervision and configure
+`checkpoint: {Spectre.Ledger.ServerStore, store, conversation_key}`. It supports
+CAS, bounded capacity, strict checksum/revision replay, and monotonic revisions
+after deletion. A corrupt/torn tail requires operator recovery; it is never
+silently truncated. This store is distinct from GAM facts and legacy Instance
+checkpoint archives. Default capacity is 256 MiB; plan explicit rotation or
+migration rather than silently discarding append history.
+
+An installation may configure `server_store: [path: "..."]` to expose a
+Stack-owned `{:spectre_ledger, :server_store}` resource, or the host may pass
+`ledger_server_store: store` in Server options. The generated helper accepts
+`ledger(ctx, {:entries, key}, on_result: :history)` or `{:head, key}`. These are
+read-only; entries contain metadata, while head contains the current checkpoint
+bytes. A scope/key selection policy remains the host application's responsibility.
+
+For local integration tests set `SPECTRE_PATH=../spectre`; the core branch is
+`feature/agent-server-gam`. No transport credentials are needed for fixture tests.

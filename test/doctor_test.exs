@@ -73,7 +73,7 @@ defmodule SpectreLedger.DoctorTest do
     assert %{
              "status" => "warning",
              "summary" => %{"warnings" => 2},
-             "core" => %{"spectre_version" => "0.3.3"}
+             "core" => %{"spectre_version" => "0.4.0"}
            } = report |> Report.format(:json) |> Jason.decode!()
 
     assert Report.format(report, :text) =~ "Spectre Ledger doctor 0.1.0: warning"

@@ -1,7 +1,7 @@
 # Spectre Ledger public API — 0.1.0
 
 This file is the normative public API manifest for Spectre Ledger `0.1.0`,
-which targets Spectre `~> 0.3.3`. Compatibility guarantees apply only to the
+which targets Spectre `~> 0.4.0`. Compatibility guarantees apply only to the
 modules and callables listed below. Anything absent from this manifest is an
 implementation detail, even when exported by the BEAM.
 
