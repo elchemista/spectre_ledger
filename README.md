@@ -199,10 +199,16 @@ Server. Tool results arrive through `on_result` after durable acquisition.
 CAS, checksummed replay and monotonic revisions after deletion. At capacity it
 atomically compacts the latest value of every key together with the pending
 mutation. Call `Spectre.Ledger.ServerStore.compact(store)` for explicit compaction.
-All live keys, including GAM records, and tombstone revision fences survive.
+All live keys, including GAM records, survive. Deleted keys and their metadata
+are removed from memory and disk. A persistent global sequence assigns each new
+or recreated key a fresh revision, preserving ABA protection without retaining
+tombstones forever. Existing-key CAS still advances that key by exactly one.
 Capacity must still fit live data (default 256 MiB). Initialization and compaction
 use exclusive temporary files with mode 0600, file sync, rename and directory sync.
-Legacy SPLS1 logs remain readable and become SPLS2 on compaction.
+Legacy SPLS1 and SPLS2/checkpoint-v1 logs remain readable. Compaction writes
+SPLS2/checkpoint-v2: old binaries reject this marker rather than reopening a
+tombstone-free file with an unsafe revision allocator. Reads wait for an ongoing
+compaction, consistently with the write APIs, without a five-second timeout.
 
 A corrupt or torn tail requires operator inspection: replay cannot establish
 whether damaged bytes were previously acknowledged and never silently truncates.

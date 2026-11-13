@@ -2,8 +2,11 @@
 
 ## Unreleased — Spectre 0.4
 
+- Purge deleted journal keys during compaction, preserve ABA fences with a global revision watermark, and retain backwards replay for prior log formats.
+- Wait for busy-store reads consistently with durable writes.
+
 - Fence inspection to the current Server checkpoint and expose metadata only.
-- Add atomic automatic/explicit compaction, preserve tombstone revisions and live GAM records, and initialize private files atomically.
+- Add atomic automatic/explicit compaction, preserve revision fences and live GAM records, and initialize private files atomically.
 
 - Add the AgentServer coordination Store port, Stack resource lifecycle, and read-only ledger inspection.
 - Require Spectre `~> 0.4.0`; retain legacy APIs where applicable.

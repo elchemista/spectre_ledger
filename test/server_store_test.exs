@@ -113,7 +113,7 @@ defmodule Spectre.Ledger.ServerStoreTest do
   } do
     store = start_supervised!({ServerStore, path: Path.join(dir, "scope.ledger")})
     {:ok, 1} = ServerStore.put_new(store, :own, "private own checkpoint")
-    {:ok, 1} = ServerStore.put_new(store, :other, "another conversation secret")
+    {:ok, _} = ServerStore.put_new(store, :other, "another conversation secret")
     context = %{checkpoint_ref: %{adapter: ServerStore, store: store, key: :own}}
     assert {:ok, result} = Spectre.Ledger.ServerTool.invoke(:head, %{scope: :current}, context)
     assert Map.keys(result) |> Enum.sort() == [:bytes, :digest, :revision]
@@ -130,18 +130,18 @@ defmodule Spectre.Ledger.ServerStoreTest do
   end
 
   @tag :tmp_dir
-  test "automatic compaction preserves all live facts and tombstone revisions across a kill", %{
+  test "automatic compaction preserves live facts and revision fences across a kill", %{
     tmp_dir: dir
   } do
     path = Path.join(dir, "compact.ledger")
     {:ok, store} = ServerStore.start_link(path: path, max_bytes: 12_000)
     {:ok, 1} = ServerStore.put_new(store, {:gam, :fact}, %{admitted: true})
-    {:ok, 1} = ServerStore.put_new(store, :deleted, "retired-private-payload")
-    assert :ok = ServerStore.delete(store, :deleted, 1)
+    {:ok, deleted_revision} = ServerStore.put_new(store, :deleted, "retired-private-payload")
+    assert :ok = ServerStore.delete(store, :deleted, deleted_revision)
     assert File.read!(path) =~ "retired-private-payload"
-    {:ok, 1} = ServerStore.put_new(store, :current, String.duplicate("a", 1500))
+    {:ok, first_revision} = ServerStore.put_new(store, :current, String.duplicate("a", 1500))
 
-    for expected <- 1..49 do
+    for expected <- first_revision..(first_revision + 48) do
       assert {:ok, next} =
                ServerStore.compare_and_swap(
                  store,
@@ -161,11 +161,16 @@ defmodule Spectre.Ledger.ServerStoreTest do
     Process.exit(store, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^store, :killed}
     {:ok, restored} = ServerStore.start_link(path: path, max_bytes: 12_000)
-    assert {:ok, %{revision: 50}} = ServerStore.fetch(restored, :current)
+    final_revision = first_revision + 49
+    assert {:ok, %{revision: ^final_revision}} = ServerStore.fetch(restored, :current)
     assert {:ok, %{value: %{admitted: true}}} = ServerStore.fetch(restored, {:gam, :fact})
     assert :not_found = ServerStore.fetch(restored, :deleted)
-    assert {:ok, 3} = ServerStore.put_new(restored, :deleted, "new")
-    assert {:error, :conflict} = ServerStore.compare_and_swap(restored, :current, 49, "stale")
+    assert {:ok, recreated_revision} = ServerStore.put_new(restored, :deleted, "new")
+    assert recreated_revision > final_revision
+
+    assert {:error, :conflict} =
+             ServerStore.compare_and_swap(restored, :current, final_revision - 1, "stale")
+
     GenServer.stop(restored)
   end
 
@@ -212,5 +217,147 @@ defmodule Spectre.Ledger.ServerStoreTest do
     {:ok, store} = ServerStore.start_link(path: path)
     assert {:ok, %{revision: 2, value: :updated}} = ServerStore.fetch(store, :legacy)
     GenServer.stop(store)
+  end
+
+  @tag :tmp_dir
+  test "released journal keys disappear from memory and disk without losing the global ABA fence",
+       %{tmp_dir: dir} do
+    path = Path.join(dir, "bounded.ledger")
+    {:ok, store} = ServerStore.start_link(path: path, max_bytes: 4000)
+    {:ok, live_revision} = ServerStore.put_new(store, :live_fact, %{done: true})
+
+    for index <- 1..500 do
+      {:ok, revision} = ServerStore.put_new(store, {:journal, index}, :pending)
+      assert :ok = ServerStore.delete(store, {:journal, index}, revision)
+
+      if rem(index, 25) == 0 do
+        assert :ok = ServerStore.compact(store)
+        state = :sys.get_state(store)
+        assert map_size(state.entries) == 1
+        assert length(state.history) == 1
+        assert File.stat!(path).size < 1000
+      end
+    end
+
+    assert :ok = ServerStore.delete(store, :live_fact, live_revision)
+    assert :ok = ServerStore.compact(store)
+    state = :sys.get_state(store)
+    assert state.entries == %{}
+    assert state.history == []
+    assert File.stat!(path).size < 512
+    watermark = state.sequence
+    GenServer.stop(store)
+    {:ok, restored} = ServerStore.start_link(path: path, max_bytes: 4000)
+    assert {:ok, next_revision} = ServerStore.put_new(restored, {:journal, 1}, :new)
+    assert next_revision == watermark + 1
+    assert {:error, :conflict} = ServerStore.compare_and_swap(restored, {:journal, 1}, 2, :stale)
+    assert {:error, :conflict} = ServerStore.delete(restored, {:journal, 1}, 2)
+    assert {:ok, %{value: :new}} = ServerStore.fetch(restored, {:journal, 1})
+    GenServer.stop(restored)
+  end
+
+  @tag :tmp_dir
+  test "SPLS1 and checkpoint-v1 preserve old per-key histories then accept globally fenced recreation",
+       %{tmp_dir: dir} do
+    records = [
+      %{sequence: 1, action: :put, key: :a, revision: 1, value: :a},
+      %{sequence: 2, action: :put, key: :b, revision: 1, value: :b},
+      %{sequence: 3, action: :delete, key: :a, revision: 2, value: nil}
+    ]
+
+    legacy_log = ["SPLS1" | Enum.map(records, &frame/1)]
+
+    checkpoint_v1 = [
+      "SPLS2",
+      frame(%{checkpoint: 1, sequence: 3, count: 2}),
+      frame(%{entry: Enum.at(records, 1)}),
+      frame(%{entry: Enum.at(records, 2)})
+    ]
+
+    for {name, bytes} <- [{"v1", legacy_log}, {"v2", checkpoint_v1}] do
+      path = Path.join(dir, name <> ".ledger")
+      File.write!(path, bytes)
+      {:ok, store} = ServerStore.start_link(path: path)
+      assert {:ok, 4} = ServerStore.put_new(store, :a, :recreated)
+      assert {:ok, 5} = ServerStore.put_new(store, :c, :fresh)
+      assert {:ok, 2} = ServerStore.compare_and_swap(store, :b, 1, :updated)
+      GenServer.stop(store)
+      {:ok, store} = ServerStore.start_link(path: path)
+      assert {:ok, %{revision: 4, value: :recreated}} = ServerStore.fetch(store, :a)
+      assert {:ok, %{revision: 2, value: :updated}} = ServerStore.fetch(store, :b)
+      assert :ok = ServerStore.compact(store)
+      GenServer.stop(store)
+
+      <<"SPLS2", size::unsigned-big-32, _digest::binary-size(32), header::binary-size(size),
+        _::binary>> = File.read!(path)
+
+      assert {:ok, %{checkpoint: 2}} = Spectre.Server.Checkpoint.decode_snapshot(header)
+      {:ok, store} = ServerStore.start_link(path: path)
+      assert {:error, :conflict} = ServerStore.compare_and_swap(store, :a, 1, :stale)
+      assert {:ok, %{revision: 5, value: :fresh}} = ServerStore.fetch(store, :c)
+      GenServer.stop(store)
+    end
+  end
+
+  @tag :tmp_dir
+  test "new checkpoint replay rejects ABA fresh revisions and CAS jumps on existing keys", %{
+    tmp_dir: dir
+  } do
+    Process.flag(:trap_exit, true)
+
+    for {name, compact?} <- [{"fresh", true}, {"cas", false}] do
+      path = Path.join(dir, name <> ".ledger")
+      {:ok, store} = ServerStore.start_link(path: path)
+      {:ok, 1} = ServerStore.put_new(store, :key, :original)
+
+      if compact? do
+        :ok = ServerStore.delete(store, :key, 1)
+        :ok = ServerStore.compact(store)
+      else
+        {:ok, 2} = ServerStore.put_new(store, :other, :other)
+      end
+
+      GenServer.stop(store)
+      invalid_revision = if compact?, do: 1, else: 3
+
+      File.write!(
+        path,
+        frame(%{
+          sequence: 3,
+          action: :put,
+          key: :key,
+          revision: invalid_revision,
+          value: :invalid
+        }),
+        [:append]
+      )
+
+      assert {:error, :corrupt_store_record} = ServerStore.start_link(path: path)
+    end
+  end
+
+  @tag :tmp_dir
+  test "reads wait for a busy store beyond the old five second timeout", %{tmp_dir: dir} do
+    store = start_supervised!({ServerStore, path: Path.join(dir, "busy.ledger")})
+    {:ok, 1} = ServerStore.put_new(store, :key, :value)
+    :sys.suspend(store)
+
+    try do
+      fetch = Task.async(fn -> ServerStore.fetch(store, :key) end)
+      entries = Task.async(fn -> ServerStore.entries(store, :key) end)
+      Process.sleep(5100)
+      assert Task.yield(fetch, 0) == nil
+      assert Task.yield(entries, 0) == nil
+      :sys.resume(store)
+      assert {:ok, %{revision: 1, value: :value}} = Task.await(fetch)
+      assert {:ok, [%{revision: 1}]} = Task.await(entries)
+    after
+      :sys.resume(store)
+    end
+  end
+
+  defp frame(value) do
+    {:ok, body} = Spectre.Server.Checkpoint.encode_value(value)
+    <<byte_size(body)::unsigned-big-32, :crypto.hash(:sha256, body)::binary, body::binary>>
   end
 end

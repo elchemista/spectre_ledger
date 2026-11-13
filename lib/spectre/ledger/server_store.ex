@@ -4,8 +4,9 @@ defmodule Spectre.Ledger.ServerStore do
 
   Acknowledged mutations have been synced to disk. At capacity, the store
   atomically compacts the latest value of every key, including the pending
-  mutation. `compact/1` requests the same operation explicitly. Tombstone
-  revisions and all live keys (including GAM journal records) survive compaction.
+  mutation. `compact/1` requests the same operation explicitly. A persistent global
+  sequence protects revision fences, so deleted keys disappear from memory and
+  disk during compaction. All live keys (including GAM journal records) survive.
   Capacity must still accommodate the live data; compaction cannot shrink that.
 
   Compaction replaces append history with current entry metadata. This is a
@@ -30,7 +31,7 @@ defmodule Spectre.Ledger.ServerStore do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
   @impl Spectre.Server.Store
-  def fetch(store, key), do: GenServer.call(store, {:fetch, key})
+  def fetch(store, key), do: GenServer.call(store, {:fetch, key}, :infinity)
   @impl Spectre.Server.Store
   def put_new(store, key, value), do: GenServer.call(store, {:put_new, key, value}, :infinity)
   @impl Spectre.Server.Store
@@ -43,8 +44,9 @@ defmodule Spectre.Ledger.ServerStore do
   @doc "Atomically removes superseded payloads while preserving live keys and revision fences."
   def compact(store), do: GenServer.call(store, :compact, :infinity)
 
-  @doc "Returns bounded current append metadata; compaction retains only the latest entry per key."
-  def entries(store, key, limit \\ 50), do: GenServer.call(store, {:entries, key, limit})
+  @doc "Returns bounded current append metadata; compaction retains only the latest entry per live key."
+  def entries(store, key, limit \\ 50),
+    do: GenServer.call(store, {:entries, key, limit}, :infinity)
 
   @impl true
   def init(opts) do
@@ -83,7 +85,7 @@ defmodule Spectre.Ledger.ServerStore do
   def handle_call({:put_new, key, value}, _from, state) do
     case Map.get(state.entries, key) do
       %{deleted?: false} -> {:reply, {:error, :exists}, state}
-      previous -> commit(state, :put, key, revision(previous) + 1, value)
+      previous -> commit(state, :put, key, max(revision(previous), state.sequence) + 1, value)
     end
   end
 
@@ -147,6 +149,12 @@ defmodule Spectre.Ledger.ServerStore do
   end
 
   defp compact_reply(previous, updated, reply) do
+    updated = %{
+      updated
+      | entries: Map.reject(updated.entries, fn {_key, entry} -> entry.deleted? end),
+        fresh_revision: :global
+    }
+
     with {:ok, data, size, history} <- compact_data(updated, previous.max_bytes),
          :ok <- atomic_replace(previous.path, data),
          {:ok, file} <- :file.open(String.to_charlist(previous.path), [:append, :binary, :raw]) do
@@ -163,7 +171,7 @@ defmodule Spectre.Ledger.ServerStore do
       {:stop, {:store_write_uncertain, reason}, {:error, {:store_write_uncertain, reason}}, state}
 
   defp compact_data(state, max_bytes) do
-    header = %{checkpoint: 1, sequence: state.sequence, count: map_size(state.entries)}
+    header = %{checkpoint: 2, sequence: state.sequence, count: map_size(state.entries)}
 
     with {:ok, frame, _} <- encode_frame(header) do
       initial = {:ok, [frame, @magic], byte_size(@magic) + byte_size(frame), []}
@@ -289,15 +297,15 @@ defmodule Spectre.Ledger.ServerStore do
          do: {:ok, %{loaded | bytes: byte_size(contents)}}
   end
 
-  defp decode_log(<<@legacy_magic, rest::binary>>), do: replay(rest, empty_state())
+  defp decode_log(<<@legacy_magic, rest::binary>>), do: replay(rest, empty_state(:compatible))
 
   defp decode_log(<<@magic, rest::binary>>) do
-    with {:ok, %{checkpoint: 1, sequence: sequence, count: count} = header, _, tail} <-
+    with {:ok, %{checkpoint: version, sequence: sequence, count: count} = header, _, tail} <-
            read_frame(rest),
          true <-
-           map_size(header) == 3 and is_integer(sequence) and sequence >= 0 and
+           version in [1, 2] and map_size(header) == 3 and is_integer(sequence) and sequence >= 0 and
              is_integer(count) and count >= 0 and count <= sequence,
-         {:ok, state, tail} <- restore_entries(tail, %{empty_state() | sequence: sequence}, count) do
+         {:ok, state, tail} <- restore_entries(tail, snapshot_state(version, sequence), count) do
       replay(tail, state)
     else
       false -> {:error, :corrupt_store_record}
@@ -315,7 +323,9 @@ defmodule Spectre.Ledger.ServerStore do
         [] -> 0
       end
 
-    if latest == state.sequence, do: {:ok, state, tail}, else: {:error, :corrupt_store_record}
+    if state.fresh_revision == :global or latest == state.sequence,
+      do: {:ok, state, tail},
+      else: {:error, :corrupt_store_record}
   end
 
   defp restore_entries(bytes, state, remaining) do
@@ -381,16 +391,36 @@ defmodule Spectre.Ledger.ServerStore do
          %{sequence: sequence, action: action, key: key, revision: version, value: value} = record,
          state
        )
-       when action in [:put, :delete] and map_size(record) == 5 do
+       when action in [:put, :delete] and map_size(record) == 5 and is_integer(sequence) and
+              is_integer(version) do
     previous = Map.get(state.entries, key)
     valid_delete = action != :delete or (match?(%{deleted?: false}, previous) and is_nil(value))
 
-    if sequence == state.sequence + 1 and version == revision(previous) + 1 and valid_delete,
-      do: :ok,
-      else: {:error, :corrupt_store_record}
+    if sequence == state.sequence + 1 and valid_revision?(action, version, previous, state) and
+         valid_delete,
+       do: :ok,
+       else: {:error, :corrupt_store_record}
   end
 
   defp valid_record(_, _), do: {:error, :corrupt_store_record}
+
+  # SPLS1 and checkpoint-v1 files may contain historical per-key fresh revisions.
+  # Newly compacted files fence every fresh/recreated key with the global sequence.
+  # Existing live keys always retain the strict CAS successor rule.
+  defp valid_revision?(:put, version, previous, state)
+       when is_nil(previous) or previous.deleted? do
+    global = max(revision(previous), state.sequence) + 1
+
+    version == global or
+      (state.fresh_revision == :compatible and version == revision(previous) + 1)
+  end
+
+  defp valid_revision?(_action, version, previous, _state), do: version == revision(previous) + 1
+
+  defp snapshot_state(version, sequence) do
+    mode = if version == 1, do: :compatible, else: :global
+    %{empty_state(mode) | sequence: sequence}
+  end
 
   defp apply_record(state, record, body) do
     entry = %{
@@ -414,7 +444,9 @@ defmodule Spectre.Ledger.ServerStore do
       |> Map.delete(:value)
       |> Map.put(:digest, Base.encode16(:crypto.hash(:sha256, body), case: :lower))
 
-  defp empty_state, do: %{sequence: 0, entries: %{}, history: [], bytes: 0}
+  defp empty_state(mode \\ :global),
+    do: %{sequence: 0, entries: %{}, history: [], bytes: 0, fresh_revision: mode}
+
   defp revision(nil), do: 0
   defp revision(entry), do: entry.revision
 end
