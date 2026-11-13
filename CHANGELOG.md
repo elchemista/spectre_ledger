@@ -2,7 +2,10 @@
 
 ## Unreleased — Spectre 0.4
 
-- Add the append-only AgentServer coordination Store port, Stack resource lifecycle, and read-only ledger inspection.
+- Fence inspection to the current Server checkpoint and expose metadata only.
+- Add atomic automatic/explicit compaction, preserve tombstone revisions and live GAM records, and initialize private files atomically.
+
+- Add the AgentServer coordination Store port, Stack resource lifecycle, and read-only ledger inspection.
 - Require Spectre `~> 0.4.0`; retain legacy APIs where applicable.
 
 All notable changes to Spectre Ledger are documented here.

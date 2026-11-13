@@ -1,6 +1,6 @@
 defmodule Spectre.Ledger do
   @moduledoc """
-  Append-only storage for Spectre 0.4 AgentServer coordination and legacy receipts.
+  Durable storage for Spectre 0.4 AgentServer coordination and legacy append-only receipts.
 
   `Spectre.Ledger.ServerStore` implements the revisioned AgentServer store port.
   The legacy archive also implements `Spectre.Instance.CheckpointStore` and

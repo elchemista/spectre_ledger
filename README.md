@@ -193,21 +193,34 @@ registration contract. Install the package in the Agent's Stack and use
 creates helpers; this package does not export functions to import into the
 Server. Tool results arrive through `on_result` after durable acquisition.
 
-`Spectre.Ledger.ServerStore` is an append-only, synced local coordination log
-implementing `Spectre.Server.Store`. Start it under supervision and configure
+`Spectre.Ledger.ServerStore` is a synced local coordination log implementing
+`Spectre.Server.Store`. Start it under supervision and configure
 `checkpoint: {Spectre.Ledger.ServerStore, store, conversation_key}`. It supports
-CAS, bounded capacity, strict checksum/revision replay, and monotonic revisions
-after deletion. A corrupt/torn tail requires operator recovery; it is never
-silently truncated. This store is distinct from GAM facts and legacy Instance
-checkpoint archives. Default capacity is 256 MiB; plan explicit rotation or
-migration rather than silently discarding append history.
+CAS, checksummed replay and monotonic revisions after deletion. At capacity it
+atomically compacts the latest value of every key together with the pending
+mutation. Call `Spectre.Ledger.ServerStore.compact(store)` for explicit compaction.
+All live keys, including GAM records, and tombstone revision fences survive.
+Capacity must still fit live data (default 256 MiB). Initialization and compaction
+use exclusive temporary files with mode 0600, file sync, rename and directory sync.
+Legacy SPLS1 logs remain readable and become SPLS2 on compaction.
+
+A corrupt or torn tail requires operator inspection: replay cannot establish
+whether damaged bytes were previously acknowledged and never silently truncates.
+Compaction drops superseded append metadata. This coordination store is distinct
+from GAM facts and immutable audit archives. Deletion appends a tombstone; old
+payloads remain until compaction. Rewriting the active file does not promise
+forensic erasure from backups, filesystem snapshots or storage media.
 
 An installation may configure `server_store: [path: "..."]` to expose a
-Stack-owned `{:spectre_ledger, :server_store}` resource, or the host may pass
-`ledger_server_store: store` in Server options. The generated helper accepts
-`ledger(ctx, {:entries, key}, on_result: :history)` or `{:head, key}`. These are
-read-only; entries contain metadata, while head contains the current checkpoint
-bytes. A scope/key selection policy remains the host application's responsibility.
+Stack-owned `{:spectre_ledger, :server_store}` resource. Configure that resource as
+the Server's checkpoint binding. The worker receives the actual runtime-owned
+checkpoint reference, never a handle or key chosen through tool input or service
+options. Helpers accept `ledger(ctx, {:head}, on_result: :head)` and
+`ledger(ctx, {:entries}, on_result: :history)`. Explicit-key forms remain available,
+but reject any key other than the current Server checkpoint's key. `head` returns
+only revision, digest and byte count; `entries` returns metadata. Neither returns
+checkpoint payloads. Use `lab(ctx, {:inspect, :checkpoint}, ...)` to inspect the
+current snapshot directly inside its worker without copying its bytes into inbox.
 
 For local integration tests set `SPECTRE_PATH=../spectre`; the core branch is
 `feature/agent-server-gam`. No transport credentials are needed for fixture tests.
