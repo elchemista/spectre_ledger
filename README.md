@@ -1,232 +1,99 @@
 # Spectre Ledger
 
-Spectre Ledger is an append-only durable checkpoint and boundary-receipt ledger
-for Spectre. It implements two existing core boundaries:
-`Spectre.Instance.CheckpointStore` and `Spectre.Receipt.Sink`. Spectre remains
-the only runtime owner, scheduler, receipt-outbox owner, and recovery authority.
+Ledger provides durable storage and inspection at Spectre's persistence boundaries.
+For Spectre 0.4, `Spectre.Ledger.ServerStore` stores AgentServer coordination state
+and GAM journal values with CAS revisions, checksums, synced writes and atomic
+compaction. It is a storage port; it does not become another agent runtime.
 
-Ledger records checkpoints that Spectre actually persists and the
-nondeterministic or authority boundaries for which Spectre emits receipts. It
-does **not** claim to record every runtime revision, provide deterministic
-execution replay, or make model calls and external effects exactly once.
+The package also retains **separate Instance checkpoint and receipt archives**,
+Memory/PostgreSQL adapters and verified bundles. Those append-only archive APIs
+are useful directly, but their formats and options are not the AgentServer Store.
 
-## Installation
+## Installation on the 0.4 development branch
 
-```elixir
-def deps do
-  [
-    {:spectre, "~> 0.4.0"},
-    {:spectre_ledger, github: "elchemista/spectre_ledger", branch: "main"}
-  ]
-end
-```
-
-Ledger is consumed from GitHub and has not been published to Hex. PostgreSQL
-storage schema version `2` is an independent internal schema number, not a
-package release number.
-
-The PostgreSQL adapter is optional. Consumers using only Memory or bundle
-verification do not pull Ecto SQL or Postgrex transitively. Applications that
-select PostgreSQL must declare the database dependencies themselves:
+This branch targets the **unreleased Spectre 0.4 architecture**. Use matching Git
+branches; the examples do not assume that Spectre 0.4 is available from Hex.
+For reproducible deployments, replace branch selectors with reviewed commit refs.
 
 ```elixir
 def deps do
   [
-    {:spectre_ledger, github: "elchemista/spectre_ledger", branch: "main"},
-    {:ecto_sql, "~> 3.14"},
-    {:postgrex, "~> 0.22.4"}
+    {:spectre, github: "elchemista/spectre",
+     branch: "feature/agent-server-gam", override: true},
+    {:spectre_ledger, github: "elchemista/spectre_ledger",
+     branch: "feature/stack-tools-0.4"}
   ]
 end
 ```
 
-During development against the adjacent Spectre checkout:
+The manifest requirement `{:spectre, "~> 0.4.0"}` describes compatibility, not
+publication availability. Local contributors can use `SPECTRE_PATH=../spectre` for this repository's dependency override.
 
-```console
-SPECTRE_PATH=../spectre mix deps.get
-SPECTRE_PATH=../spectre mix test
-```
-
-## Configure checkpoints and receipts
-
-The Memory backend is caller-owned and intentionally volatile:
+## Persist and inspect an AgentServer
 
 ```elixir
-{:ok, ledger} = Spectre.Ledger.Backend.Memory.start_link()
+defmodule MyApp.AI do
+  use Spectre.Stack
+  install Spectre.Ledger
+end
 
-ledger_opts = [
-  backend: :memory,
-  server: ledger,
-  namespace: "development"
-]
+defmodule MyApp.SupportServer do
+  use Spectre.Server, tools: MyApp.AI
 
-checkpoint_store = Spectre.Ledger.checkpoint_store(ledger_opts)
-receipt_sink = Spectre.Ledger.receipt_sink(ledger_opts)
+  def handle_flow({:support, :checkpoint}, _input, ctx),
+    do: ledger(ctx, {:head}, on_result: :checkpoint)
 
-{:ok, instance} =
-  Spectre.summon(
-    agent: MyApp.Agent,
-    subject: subject,
-    checkpoint_store: checkpoint_store,
-    receipt_mode: :required,
-    receipt_sink: receipt_sink
-  )
+  def handle_result(:checkpoint, {:ok, head}, ctx),
+    do: respond(ctx, "Checkpoint revision #{head.revision}: #{head.bytes} bytes")
+
+  def handle_result(tag, result, ctx), do: super(tag, result, ctx)
+end
+
+defmodule MyApp.SupportAgent do
+  use Spectre.Agent, stack: MyApp.AI, server: MyApp.SupportServer
+  flow :support do
+    on :checkpoint, regex: ~r/^checkpoint$/i
+  end
+end
+
+{:ok, store} = Spectre.Ledger.ServerStore.start_link(path: "data/support.ledger")
+{:ok, server} = Spectre.Server.start_link(
+  agent: MyApp.SupportAgent,
+  checkpoint: {Spectre.Ledger.ServerStore, store, {:support, "conversation-42"}},
+  consumer: self())
+{:ok, interaction} = Spectre.Server.input(server, "checkpoint")
 ```
 
-Use `:observational` when receipt delivery must never gate a Run. Use
-`:required` when Spectre must stage the payload, commit its canonical outbox,
-cross the checkpoint durability barrier, append idempotently, and acknowledge
-the outbox before completing the boundary. Required mode needs both the
-checkpoint store and the payload-capable receipt sink shown above.
+Put both processes under your supervision tree in an application. `head` returns
+only `%{revision: ..., digest: ..., bytes: ...}` for this Server's checkpoint.
+It does not copy saved messages, candidates or assigns into a tool result. Explicit
+foreign keys are rejected. `{:entries}` returns metadata, not an immutable audit trail.
 
-Read and verify one Instance's persisted evidence with the same backend
-options:
+## A native revisioned Store
 
 ```elixir
-{:ok, envelopes} = Spectre.Ledger.receipts(instance_ref, ledger_opts)
-{:ok, report} = Spectre.Ledger.verify_receipts(instance_ref, ledger_opts)
+{:ok, revision} = Spectre.Ledger.ServerStore.put_new(store, :example, %{value: 1})
+{:ok, next_revision} = Spectre.Ledger.ServerStore.compare_and_swap(
+  store, :example, revision, %{value: 2})
+:ok = Spectre.Ledger.ServerStore.delete(store, :example, next_revision)
+:ok = Spectre.Ledger.ServerStore.compact(store)
 ```
 
-`receipt_entries/2` exposes physical append order. The receipt envelope keeps
-its separate `canonical_revision`, because asynchronous observational delivery
-may arrive out of canonical order. Verification reports that distinction
-instead of silently reordering evidence.
+Revision tokens are opaque and monotonic; a new key need not start at 1.
+Compaction removes superseded values and deleted keys from memory and disk while a
+global sequence prevents stale CAS tokens matching recreated keys. It runs automatically
+at append capacity and can be scheduled explicitly. Live values must still fit capacity
+(default 256 MiB). Writes, initialization and compaction use durability barriers;
+reads wait for a busy Store. Corrupt/torn logs fail closed for operator inspection.
 
-Aggregate model calls and cumulative usage from one complete Instance receipt
-stream without changing Ledger's append-only storage contract:
+Compaction is not forensic erasure of filesystem snapshots or backups. The
+[Store and recovery guide](docs/SPECTRE_0_4.md) covers format upgrades, GAM journal
+configuration, Stack-owned resources and the distinct legacy archive contracts.
 
-```elixir
-{:ok, usage} = Spectre.Ledger.inference_usage(instance_ref, ledger_opts)
+## Documentation
 
-usage.provider_calls
-usage.usage.total_tokens
-usage.models
-```
-
-The projection joins `:inference_selected` and
-`:inference_attempt_terminal` receipts by durable attempt identity. It counts
-only attempts with `provider_started: true` as provider calls, includes usage
-from completed and failed attempts, and keeps `:provider`, `:estimated`, and
-`:unavailable` quality counts explicit.
-
-## PostgreSQL
-
-For production, use `backend: :postgres` with a host-owned, already running
-Ecto Repo. Ledger neither configures nor supervises that Repo. Generate and run
-the package migration first:
-
-```console
-mix spectre_ledger.gen.migration
-mix ecto.migrate
-```
-
-Storage schema v2 adds isolated receipt stream, entry, and payload tables. The
-generated SQL upgrades an existing schema v1 in place and keeps checkpoint
-tables and data. Writes require PostgreSQL `READ COMMITTED` isolation.
-
-See [Architecture](docs/ARCHITECTURE.md), [Operations](docs/OPERATIONS.md), and
-the normative [Public API](docs/PUBLIC_API.md) for the complete contracts.
-
-## Checkpoint Bundle v1
-
-Bundle v1 transports one complete persisted-checkpoint chain. It does not yet
-contain the separate boundary-receipt chain.
-
-```elixir
-{:ok, json} = Spectre.Ledger.Bundle.export(entries, objects)
-{:ok, report} = Spectre.Ledger.Bundle.verify(json)
-```
-
-The v1 manifest permanently says:
-
-- capture: `persisted_checkpoints`
-- completeness: `checkpoint_playback`
-- every revision: `false`
-- deterministic replay claim: `false`
-
-Verification is bounded by encoded-size, entry-count, object-count,
-per-object, total-object, and nesting-depth limits. It validates the global
-checksum, Ledger entry chain, raw object digests, and Spectre Foundation
-checkpoint digests. Foundation canonical decoding may load an existing BEAM
-module named by the checkpoint, including its `@on_load` callback. Treat
-direct bundle verification as a trusted/local-artifact operation; isolate
-verification of external input.
-
-Bundle verification does not call `Spectre.Run.restore/1`, start an Instance,
-activate an Agent, or replay model, action, or effect execution.
-
-## Doctor and telemetry
-
-```console
-mix spectre_ledger.doctor
-mix spectre_ledger.doctor --backend postgres --repo MyApp.Repo --strict
-mix spectre_ledger.doctor --format json
-```
-
-Doctor composes `Spectre.Doctor`, checks checkpoint and receipt backend
-capabilities, warns that Memory is volatile, and performs a read-only
-PostgreSQL schema probe. It never starts resources or writes storage.
-
-Ledger emits privacy-safe events under `[:spectre, :ledger, ...]`, including
-checkpoint and receipt append/read operations. Raw stream keys, receipt
-payloads, checkpoints, credentials, Repo configuration, and raw errors are not
-telemetry metadata.
-
-## Security
-
-Treat checkpoints, receipt envelopes, and staged payload objects as sensitive
-application state. Spectre redacts constitutionally sensitive receipt paths,
-but ordinary admitted input and model output are still confidential evidence.
-Content addressing proves integrity, not confidentiality or authorization.
-Encrypt and restrict the backing store as required, retain payload objects for
-as long as an outbox or receipt entry can reference them, and verify every
-artifact before use. See [SECURITY.md](SECURITY.md).
-
-## License
-
-Apache-2.0. See the repository `LICENSE` file.
-
-## AgentServer / Spectre 0.4
-
-This branch implements the optional `Spectre.Stack.Installable.tools/1`
-registration contract. Install the package in the Agent's Stack and use
-`use Spectre.Server, tools: MyApp.AI` in the separate Server module. The core
-creates helpers; this package does not export functions to import into the
-Server. Tool results arrive through `on_result` after durable acquisition.
-
-`Spectre.Ledger.ServerStore` is a synced local coordination log implementing
-`Spectre.Server.Store`. Start it under supervision and configure
-`checkpoint: {Spectre.Ledger.ServerStore, store, conversation_key}`. It supports
-CAS, checksummed replay and monotonic revisions after deletion. At capacity it
-atomically compacts the latest value of every key together with the pending
-mutation. Call `Spectre.Ledger.ServerStore.compact(store)` for explicit compaction.
-All live keys, including GAM records, survive. Deleted keys and their metadata
-are removed from memory and disk. A persistent global sequence assigns each new
-or recreated key a fresh revision, preserving ABA protection without retaining
-tombstones forever. Existing-key CAS still advances that key by exactly one.
-Capacity must still fit live data (default 256 MiB). Initialization and compaction
-use exclusive temporary files with mode 0600, file sync, rename and directory sync.
-Legacy SPLS1 and SPLS2/checkpoint-v1 logs remain readable. Compaction writes
-SPLS2/checkpoint-v2: old binaries reject this marker rather than reopening a
-tombstone-free file with an unsafe revision allocator. Reads wait for an ongoing
-compaction, consistently with the write APIs, without a five-second timeout.
-
-A corrupt or torn tail requires operator inspection: replay cannot establish
-whether damaged bytes were previously acknowledged and never silently truncates.
-Compaction drops superseded append metadata. This coordination store is distinct
-from GAM facts and immutable audit archives. Deletion appends a tombstone; old
-payloads remain until compaction. Rewriting the active file does not promise
-forensic erasure from backups, filesystem snapshots or storage media.
-
-An installation may configure `server_store: [path: "..."]` to expose a
-Stack-owned `{:spectre_ledger, :server_store}` resource. Configure that resource as
-the Server's checkpoint binding. The worker receives the actual runtime-owned
-checkpoint reference, never a handle or key chosen through tool input or service
-options. Helpers accept `ledger(ctx, {:head}, on_result: :head)` and
-`ledger(ctx, {:entries}, on_result: :history)`. Explicit-key forms remain available,
-but reject any key other than the current Server checkpoint's key. `head` returns
-only revision, digest and byte count; `entries` returns metadata. Neither returns
-checkpoint payloads. Use `lab(ctx, {:inspect, :checkpoint}, ...)` to inspect the
-current snapshot directly inside its worker without copying its bytes into inbox.
-
-For local integration tests set `SPECTRE_PATH=../spectre`; the core branch is
-`feature/agent-server-gam`. No transport credentials are needed for fixture tests.
+- [AgentServer integration, helpers and authority](docs/SPECTRE_0_4.md)
+- [Migration from the 0.3 integration](docs/MIGRATING_TO_0_4.md)
+- [Standalone and retained runtime reference](docs/INSTANCE_ARCHIVES.md)
+- [Public API](docs/PUBLIC_API.md) and [changelog](CHANGELOG.md)
+- [Governed Act Model](https://spectre.guide/en/governed-act-model) and [core tool lifecycle](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/STACK_TOOLS.md)

@@ -1,5 +1,9 @@
 # Operations
 
+[Current README](../README.md) · [AgentServer 0.4](SPECTRE_0_4.md) · [Migration](MIGRATING_TO_0_4.md)
+
+The archive/backend/receipt contracts below are the retained Instance APIs. The new AgentServer coordination Store has separate options, formats and compaction semantics.
+
 ## Readiness
 
 Run Ledger Doctor after configuration and before serving traffic:

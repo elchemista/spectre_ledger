@@ -2,6 +2,8 @@
 
 ## Unreleased — Spectre 0.4
 
+- Rewrite the README around standalone use and Stack → Agent → Server integration; add lifecycle/GAM, migration and explicitly scoped retained-runtime guides to ExDoc.
+
 - Purge deleted journal keys during compaction, preserve ABA fences with a global revision watermark, and retain backwards replay for prior log formats.
 - Wait for busy-store reads consistently with durable writes.
 
