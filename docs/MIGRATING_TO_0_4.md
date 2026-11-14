@@ -22,7 +22,7 @@ The package's compatibility requirement is Spectre `~> 0.4.0`; use the core
 3. Return the context containing generated helper commands. Handle actual tagged
    results in `handle_result/3`; there is no synchronous helper result and no import
    of invented <code>Spectre.Ledger.ledger/3</code> functions.
-4. For consequential work, configure real host GAM bindings/executors and consent
+4. For consequential work, configure AgentServer allowed operations and consent
    continuations where required. Installing a package does not authorize end-user
    effects. Follow the [GAM manifest](https://spectre.guide/en/governed-act-model).
 5. Choose and supervise the actual runtime resources and checkpoint Store. Keep
@@ -39,3 +39,16 @@ See the [retained reference](INSTANCE_ARCHIVES.md) for these APIs and
 [0.4 helper/lifecycle contracts](SPECTRE_0_4.md) for the new integration. Migration
 is an ownership/API change, not a promise that every legacy convenience now
 implicitly routes through AgentServer or GAM.
+
+## Skill Servers and the shared GAM
+
+A mounted Skill may have a separate Server, state and checkpoint. It automatically
+reuses the root AgentServer's GAM Domain, authority ledger and execution boundary;
+no Skill Host, second Domain or manual ingress is part of this migration. Keep
+root operation permissions and mount `governed:` references aligned. Proposal
+provenance remains recorded, confirmations stay bound to the exact Skill and
+presentation, and timer closure cannot erase a Duty. Parallel workers remain
+subject to the same kernel admission laws.
+
+See [the package integration guide](SPECTRE_0_4.md#mounted-skill-runtimes) and the
+[core Skill ownership and consent contract](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md).

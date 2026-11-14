@@ -34,12 +34,17 @@ checkpoint = {Spectre.Ledger.ServerStore, MyApp.Checkpoints, conversation_key}
 same Store process, with its own journal keys, through a pair:
 
 ```elixir
-bridge = [scope: gam_scope,
+gam = [
+  storage: {:disk, "var/gam/" <> conversation_key},
   store: {Spectre.Ledger.ServerStore, MyApp.Checkpoints},
-  bindings: host_bindings]
+  operations: allowed_operations
+]
 ```
 
-Pass `checkpoint: checkpoint` and `gam: {Spectre.Server.GAM, bridge}` to the Server.
+Pass `checkpoint: checkpoint` and `gam: gam` to the Server. AgentServer creates
+its authority ledger separately; both the journal and authority history must
+have matching durability. Without custom storage, Spectre supplies a coherent
+checkpoint/journal automatically.
 The Store does not supply a GAM scope, invent mandates or approve a Candidate.
 Do not confuse coordination/journal persistence with an immutable GAM evidence
 archive or the legacy `Spectre.Instance.CheckpointStore` adapter.
@@ -124,11 +129,16 @@ need governance; read-oriented operations are not categorically exempt from thos
 application boundaries. Ordinary configured cognition is not automatically a new
 end-user authorization ceremony.
 
-The host supplies a real GAM scope, Candidate factories, mandates/evidence,
-Presentations or interpretation when needed, and admitted executors. `bind:` names
-that host operation only. Native package calls outside the Server do not acquire
-these guarantees automatically. Do not call an effect executor directly from a
-flow callback and describe that call as governed.
+AgentServer automatically owns the GAM scope, Candidate preparation, authority
+checks, consent Presentations, admitted execution and recorded results. Mounted
+Skill Servers use that same Domain and authority ledger. The application enables
+operations, supplies authenticated identity and business restrictions, and
+presents the Server's consent requests; it does not implement a GAM Host.
+`bind:` selects an operation reference and grants no authority. Native package
+calls outside the Server do not acquire these guarantees automatically. Use the
+[core automatic GAM APIs](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/MANAGED_GAM.md)
+when an external process needs governed execution; directly invoking an effect
+executor in a flow callback bypasses that boundary.
 
 ## Recovery and errors
 
@@ -147,3 +157,34 @@ migration. Contract drift is handled by the core recovery rules rather than
 invoking new adapter code with old arguments. See the
 [core lifecycle](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/STACK_TOOLS.md)
 and [AgentServer guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/AGENT_SERVER.md).
+
+## Mounted Skill runtimes
+
+Use the Stack-generated `ledger` helper in a Skill's ordinary
+`Spectre.Server` callbacks. The Agent mounts `Spectre.Skill, server: ...`; each
+mount then owns its GenServer, state, workers, streams, pending intentions and
+checkpoint key. No package-specific Skill adapter or extra installation is needed.
+
+```text
+AgentServer ─────┐
+Research Skill ──┼──→ one automatic GAM boundary → same Domain / authority ledger
+Knowledge Skill ┘
+```
+
+The root creates this connection once and passes it to the children. Do not
+bootstrap another Domain, copy the ledger, implement a Skill Host or extend
+ingress manually. Mounting grants no authority. Governed effects must satisfy
+both root `gam:` operations and the mount's `governed:` references; scoped
+Kinetic references keep their complete mounted scope. Ledger/Lab inspect the
+calling runtime's checkpoint, not a copy of the shared GAM history.
+
+The shared kernel orders admission while workers can run concurrently. Every
+proposal retains its Skill invocation provenance. A confirmation belongs to the
+originating mount and exact presentation, so it cannot approve a different
+Skill's pending request. Timer expiry and closure enter the same lifecycle
+ledger without erasing Acts, uncertain Outcomes or Duties. No per-Skill GAM
+configuration is required.
+
+See the [core shared/local ownership table and confirmation example](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md),
+[automatic GAM contract](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/MANAGED_GAM.md)
+and [LiveView showcase](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/DEMO.md).
