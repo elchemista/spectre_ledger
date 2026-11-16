@@ -35,7 +35,12 @@ See [lifecycle and formats](SPECTRE_0_4.md).
 ## Manifest
 
 - `Spectre.Ledger.ServerStore`
-  - functions: `start_link/1`, `fetch/2`, `put_new/3`, `compare_and_swap/4`, `delete/3`, `entries/2`, `entries/3`, `compact/1`
+  - functions: `start_link/1`, `fetch/2`, `put_new/3`, `compare_and_swap/4`, `delete/3`, `list/2`, `list/3`, `entries/2`, `entries/3`, `compact/1`, `gam_ledger/1`, `gam_domain/1`
+
+- `Spectre.Ledger.ServerStore.Postgres`
+  - functions: `start_link/1`, `fetch/2`, `put_new/3`, `compare_and_swap/4`, `delete/3`, `list/2`, `list/3`, `migration_sql/0`, `migration_sql/1`, `gam_ledger/1`, `gam_domain/1`
+- `Spectre.Ledger.DomainStore`
+  - functions: `migration_sql/0`, `migration_sql/1`, `upgrade_sql/0`, `upgrade_sql/1`
 
 - `Mix.Tasks.SpectreLedger.Doctor`
 - `Mix.Tasks.SpectreLedger.Gen.Migration`
@@ -113,3 +118,15 @@ tests the required checkpoint archive. Receipt-backend conformance separately
 tests the optional sink and receipt archive capability. Neither runner
 certifies deployment durability, encryption, retention, authorization, backup,
 or topology.
+
+## Domain projection storage
+
+`Spectre.Ledger.DomainStore` implements `Spectre.GAM.Domain.Projection.Store`
+through `open/2`, `head/2`, `commit/5`, `fetch/4`, `page/4` and `select/5`;
+`migration_sql/0,1` supplies the application-owned DDL; `upgrade_sql/0,1`
+adds indexed selection columns to an existing derived projection table. Domain records and
+revision-fenced pages are administrative reads. The optional coordination
+callback `gam_domain/1` binds both history and projection on the host Repo.
+With this adapter the Domain retains its foundation and active work, loading
+historical dependencies for each command. Full views can still materialize
+history temporarily; paginated administrative reads avoid that cost.

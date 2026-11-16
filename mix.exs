@@ -65,6 +65,7 @@ defmodule SpectreLedger.MixProject do
 
   defp docs do
     [
+      assets: %{"docs/assets" => "docs/assets"},
       main: "readme",
       source_ref: "feature/stack-tools-0.4",
       extras: [

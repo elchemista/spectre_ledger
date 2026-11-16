@@ -2,12 +2,28 @@
 
 Ledger provides durable storage and inspection at Spectre's persistence boundaries.
 For Spectre 0.4, `Spectre.Ledger.ServerStore` stores AgentServer coordination state
-and GAM journal values with CAS revisions, checksums, synced writes and atomic
-compaction. It is a storage port; it does not become another agent runtime.
+and GAM journal values with CAS revisions. The file backend provides checksums,
+synced writes and atomic compaction; the PostgreSQL backend uses a host-owned
+Ecto Repo, asynchronous queries and indexed pages without caching historical rows. It is a storage port; it does not become another agent runtime.
 
 The package also retains **separate Instance checkpoint and receipt archives**,
 Memory/PostgreSQL adapters and verified bundles. Those append-only archive APIs
 are useful directly, but their formats and options are not the AgentServer Store.
+
+## Where Ledger fits
+
+The Server owns execution and checkpoints; GAM owns authority and admission.
+Ledger supplies their storage ports. With PostgreSQL, one application-owned Repo
+can serve coordination state, canonical GAM history and its derived read model:
+
+![Spectre Ledger: Where Ledger fits](docs/assets/readme-architecture.svg)
+
+[Diagram source](docs/assets/readme-architecture.mmd).
+
+This is the `gam: [storage: :ledger]` configuration described in the
+[database setup guide](docs/SPECTRE_0_4.md). The file-backed example below instead
+uses a compacting coordination log and a separate GAM directory. Without a
+persistent projection adapter, Spectre can continue in its ordinary RAM mode.
 
 ## Installation on the 0.4 development branch
 
@@ -80,6 +96,8 @@ foreign keys are rejected. `{:entries}` returns metadata, not an immutable audit
 {:ok, revision} = Spectre.Ledger.ServerStore.put_new(store, :example, %{value: 1})
 {:ok, next_revision} = Spectre.Ledger.ServerStore.compare_and_swap(
   store, :example, revision, %{value: 2})
+{:ok, %{revision: ^next_revision, value: %{value: 2}}} =
+  Spectre.Ledger.ServerStore.fetch(store, :example)
 :ok = Spectre.Ledger.ServerStore.delete(store, :example, next_revision)
 :ok = Spectre.Ledger.ServerStore.compact(store)
 ```
@@ -95,6 +113,25 @@ Compaction is not forensic erasure of filesystem snapshots or backups. The
 [Store and recovery guide](docs/SPECTRE_0_4.md) covers format upgrades, GAM journal
 configuration, Stack-owned resources and the distinct legacy archive contracts.
 
+Configured Ledger Stack resources are discovered automatically for Managed GAM
+coordination and approval inboxes. Database history is retained; there is no
+automatic expiry purge or mandatory inbox quota. See the
+[PostgreSQL setup and policy guide](docs/SPECTRE_0_4.md#postgresql-coordination-store-and-approval-inbox).
+With `gam: [storage: :ledger]`, `gam_domain/1` supplies canonical GAM history and
+the Domain's persisted read model on the same Repo. Individual Domain records
+remain queryable after shutdown; restart rebuilds them from verified history.
+Install both sets of tables first; [setup and projection limits](docs/SPECTRE_0_4.md#canonical-gam-history-in-postgresql).
+
+Multiple root AgentServers can share one Stack resource and Ecto Repo. Give
+each logical agent a distinct stable `identity`; Managed GAM derives its Domain
+and default checkpoint key from that identity and the Agent definition. Reusing
+the same identity selects the same persisted namespace for recovery, rather
+than allocating another agent. The supervision child `id:` only identifies a
+child in its supervisor; it does not separate database records. Applications
+that override `gam: [domain: ...]` or the checkpoint key own their uniqueness.
+Size the Repo pool and storage worker budget for the expected concurrent work;
+neither requires one database connection or one Repo per agent.
+
 ## Documentation
 
 - [AgentServer integration, helpers and authority](docs/SPECTRE_0_4.md)
@@ -105,24 +142,31 @@ configuration, Stack-owned resources and the distinct legacy archive contracts.
 
 ## Use inside a reusable Skill
 
-The `ledger` helper is generated in a Skill callback module with
-`use Spectre.Server, tools: MyApp.AI`, using the same installed Stack. A
-`Spectre.Skill` with `server:` has a separate GenServer, local assigns, workers,
-streams, pending intentions and checkpoint key.
+The generated `ledger` helper also works in Skill Server callbacks using the same
+Stack. Each mount has its own process, state and checkpoint; governed operations
+share the root AgentServer's GAM Domain and must satisfy both root operations
+and mount `governed:` permissions. Ledger and Lab helpers inspect only the calling Server checkpoint. See the
+[core Skill guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md) for ownership and consent.
 
-**It uses the root AgentServer's same automatic GAM integration, Domain and
-authority ledger.** Configure `gam:` once on the root. Mounting a Skill creates
-no new Domain or grant and needs no additional Host or consent ingress. Shared
-Stack resources stay in their existing supervised runtime.
+## Contributing
 
-Agent and Skill workers can run concurrently; the shared kernel orders admission.
-A governed effect must be enabled in root `operations` and permitted by the
-mount's `governed:` references. Each Skill proposal records its mount and
-invocation provenance. Consent identifies the originating Skill and exact
-presentation: approving an email cannot approve another Skill's memory write.
-Timer closure is recorded in the same Domain and does not erase a Duty.
-Ordinary cognitive operations retain their configured provider boundary.
+Use Elixir 1.19 and OTP 28 with a matching core checkout:
 
-See the [core Skill ownership and consent guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md),
-[automatic GAM responsibilities](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/MANAGED_GAM.md)
-and [two-Skill LiveView showcase](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/DEMO.md).
+```sh
+export SPECTRE_PATH=../spectre
+mix deps.get
+mix test
+mix credo
+mix dialyzer
+mix docs --warnings-as-errors
+```
+
+PostgreSQL tests create an isolated temporary cluster. Install PostgreSQL tools
+and make `initdb` and `pg_ctl` available on `PATH`; no application database is used.
+See [profiling and operational setup](docs/SPECTRE_0_4.md) before changing storage.
+
+## Examples
+
+The [LiveView playground](https://github.com/elchemista/demo_spectre) demonstrates
+Spectre and its packages. [spectre.guide](https://spectre.guide) explains GAM and
+provides usage articles. Package versions are independent of Spectre core.

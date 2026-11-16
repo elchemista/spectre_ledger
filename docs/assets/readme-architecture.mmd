@@ -1,0 +1,8 @@
+flowchart TD
+  server["AgentServer"] -->|checkpoint| store["Ledger ServerStore"]
+  server -->|governed requests| gam["Managed GAM / Domain"]
+  gam -->|journal and approval inbox| store
+  gam -->|batches and current records| history["GAM history + Domain projection"]
+  store --> repo["Host Ecto Repo"]
+  history --> repo
+  repo --> db[(PostgreSQL)]

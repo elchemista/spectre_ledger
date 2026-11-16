@@ -24,12 +24,18 @@ defmodule Spectre.Ledger.ServerStore do
   use GenServer
   @behaviour Spectre.Server.Store
   alias Spectre.Server.Checkpoint
+  alias Spectre.Server.Store.Page
 
   @magic "SPLS2"
   @legacy_magic "SPLS1"
   @default_max_bytes 256 * 1_024 * 1_024
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
+  def start_link(opts) do
+    if Keyword.get(opts, :backend) == :postgres,
+      do: Spectre.Ledger.ServerStore.Postgres.start_link(Keyword.delete(opts, :backend)),
+      else: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
+  end
+
   @impl Spectre.Server.Store
   def fetch(store, key), do: GenServer.call(store, {:fetch, key}, :infinity)
   @impl Spectre.Server.Store
@@ -40,6 +46,15 @@ defmodule Spectre.Ledger.ServerStore do
 
   @impl Spectre.Server.Store
   def delete(store, key, revision), do: GenServer.call(store, {:delete, key, revision}, :infinity)
+
+  @impl Spectre.Server.Store
+  def list(store, prefix, opts \\ []), do: GenServer.call(store, {:list, prefix, opts}, :infinity)
+
+  @impl Spectre.Server.Store
+  def gam_ledger(store), do: GenServer.call(store, :gam_ledger)
+
+  @impl true
+  def gam_domain(store), do: GenServer.call(store, :gam_domain)
 
   @doc "Atomically removes superseded payloads while preserving live keys and revision fences."
   def compact(store), do: GenServer.call(store, :compact, :infinity)
@@ -69,6 +84,9 @@ defmodule Spectre.Ledger.ServerStore do
   end
 
   @impl true
+  def handle_call(:gam_ledger, _from, state), do: {:reply, :not_configured, state}
+  def handle_call(:gam_domain, _from, state), do: {:reply, :not_configured, state}
+
   def handle_call({:fetch, key}, _from, state) do
     result =
       case Map.get(state.entries, key) do
@@ -82,6 +100,15 @@ defmodule Spectre.Ledger.ServerStore do
     {:reply, result, state}
   end
 
+  def handle_call({:list, prefix, opts}, _from, state) do
+    fetch = fn key ->
+      entry = Map.fetch!(state.entries, key)
+      Map.take(entry, [:revision, :value])
+    end
+
+    {:reply, Page.read(state.index, fetch, prefix, opts), state}
+  end
+
   def handle_call({:put_new, key, value}, _from, state) do
     case Map.get(state.entries, key) do
       %{deleted?: false} -> {:reply, {:error, :exists}, state}
@@ -89,19 +116,11 @@ defmodule Spectre.Ledger.ServerStore do
     end
   end
 
-  def handle_call({:cas, key, expected, value}, _from, state) do
-    case Map.get(state.entries, key) do
-      %{deleted?: false, revision: ^expected} -> commit(state, :put, key, expected + 1, value)
-      _ -> {:reply, {:error, :conflict}, state}
-    end
-  end
+  def handle_call({:cas, key, expected, value}, _from, state),
+    do: compare_and_commit(state, :put, key, expected, value)
 
-  def handle_call({:delete, key, expected}, _from, state) do
-    case Map.get(state.entries, key) do
-      %{deleted?: false, revision: ^expected} -> commit(state, :delete, key, expected + 1, nil)
-      _ -> {:reply, {:error, :conflict}, state}
-    end
-  end
+  def handle_call({:delete, key, expected}, _from, state),
+    do: compare_and_commit(state, :delete, key, expected, nil)
 
   def handle_call(:compact, _from, state), do: compact_reply(state, state, :ok)
 
@@ -116,6 +135,13 @@ defmodule Spectre.Ledger.ServerStore do
 
   @impl true
   def terminate(_reason, state), do: :file.close(state.file)
+
+  defp compare_and_commit(state, action, key, expected, value) do
+    case Map.get(state.entries, key) do
+      %{deleted?: false, revision: ^expected} -> commit(state, action, key, expected + 1, value)
+      _ -> {:reply, {:error, :conflict}, state}
+    end
+  end
 
   defp commit(state, action, key, revision, value) do
     record = %{
@@ -232,21 +258,19 @@ defmodule Spectre.Ledger.ServerStore do
   end
 
   defp write_temporary(path, data) do
-    with {:ok, file} <- :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive]) do
-      try do
-        with :ok <- File.chmod(path, 0o600), do: persist(file, data)
-      after
-        :file.close(file)
-      end
-    end
+    with_file(path, [:write, :binary, :raw, :exclusive], fn file ->
+      with :ok <- File.chmod(path, 0o600), do: persist(file, data)
+    end)
   end
 
-  defp sync_directory(path) do
-    with {:ok, directory} <- :file.open(String.to_charlist(path), [:read, :raw, :directory]) do
+  defp sync_directory(path), do: with_file(path, [:read, :raw, :directory], &:file.sync/1)
+
+  defp with_file(path, modes, fun) do
+    with {:ok, file} <- :file.open(String.to_charlist(path), modes) do
       try do
-        :file.sync(directory)
+        fun.(file)
       after
-        :file.close(directory)
+        :file.close(file)
       end
     end
   end
@@ -317,13 +341,7 @@ defmodule Spectre.Ledger.ServerStore do
   defp decode_log(_), do: {:error, :invalid_store_header}
 
   defp restore_entries(tail, state, 0) do
-    latest =
-      case state.history do
-        [%{sequence: sequence} | _] -> sequence
-        [] -> 0
-      end
-
-    if state.fresh_revision == :global or latest == state.sequence,
+    if state.fresh_revision == :global or latest_sequence(state.history) == state.sequence,
       do: {:ok, state, tail},
       else: {:error, :corrupt_store_record}
   end
@@ -377,15 +395,12 @@ defmodule Spectre.Ledger.ServerStore do
   defp valid_snapshot_record(_, _), do: {:error, :corrupt_store_record}
 
   defp valid_snapshot_position?(sequence, version, state) do
-    previous_sequence =
-      case state.history do
-        [%{sequence: previous} | _] -> previous
-        [] -> 0
-      end
-
-    version > 0 and version <= sequence and sequence > previous_sequence and
+    version > 0 and version <= sequence and sequence > latest_sequence(state.history) and
       sequence <= state.sequence
   end
+
+  defp latest_sequence([%{sequence: sequence} | _]), do: sequence
+  defp latest_sequence([]), do: 0
 
   defp valid_record(
          %{sequence: sequence, action: action, key: key, revision: version, value: value} = record,
@@ -434,6 +449,11 @@ defmodule Spectre.Ledger.ServerStore do
       state
       | sequence: record.sequence,
         entries: Map.put(state.entries, record.key, entry),
+        index:
+          if(entry.deleted?,
+            do: Page.delete(state.index, record.key),
+            else: Page.put(state.index, record.key)
+          ),
         history: [metadata(record, body) | state.history]
     }
   end
@@ -445,8 +465,15 @@ defmodule Spectre.Ledger.ServerStore do
       |> Map.put(:digest, Base.encode16(:crypto.hash(:sha256, body), case: :lower))
 
   defp empty_state(mode \\ :global),
-    do: %{sequence: 0, entries: %{}, history: [], bytes: 0, fresh_revision: mode}
+    do: %{
+      sequence: 0,
+      entries: %{},
+      history: [],
+      bytes: 0,
+      fresh_revision: mode,
+      index: Page.index([])
+    }
 
   defp revision(nil), do: 0
-  defp revision(entry), do: entry.revision
+  defp revision(%{revision: revision}), do: revision
 end

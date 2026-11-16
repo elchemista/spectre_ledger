@@ -12,6 +12,23 @@ defmodule Spectre.Ledger.ServerStoreTest do
   end
 
   @tag :tmp_dir
+  test "indexed pages survive compaction, restart and fenced deletion", %{tmp_dir: dir} do
+    path = Path.join(dir, "pages.ledger")
+    {:ok, store} = ServerStore.start_link(path: path)
+    assert :not_configured = ServerStore.gam_ledger(store)
+    for n <- 1..5, do: assert({:ok, _} = ServerStore.put_new(store, {:inbox, n}, n))
+    {:ok, [{_, entry}], cursor} = ServerStore.list(store, {:inbox}, limit: 1)
+    assert entry.value == 1
+    :ok = ServerStore.compact(store)
+    GenServer.stop(store)
+    {:ok, restored} = ServerStore.start_link(path: path)
+    assert {:ok, rest, nil} = ServerStore.list(restored, {:inbox}, after: cursor)
+    assert Enum.map(rest, fn {_, entry} -> entry.value end) == [2, 3, 4, 5]
+    assert {:error, :invalid_limit} = ServerStore.entries(restored, {:inbox}, limit: 0)
+    GenServer.stop(restored)
+  end
+
+  @tag :tmp_dir
   test "append log survives restart, fences stale writers and never reuses deleted revisions", %{
     tmp_dir: dir
   } do
