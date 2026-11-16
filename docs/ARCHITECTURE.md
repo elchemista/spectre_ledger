@@ -1,5 +1,9 @@
 # Architecture
 
+[Current README](../README.md) · [AgentServer 0.4](SPECTRE_0_4.md) · [Migration](MIGRATING_TO_0_4.md)
+
+The archive/backend/receipt contracts below are the retained Instance APIs. The new AgentServer coordination Store has separate options, formats and compaction semantics.
+
 Spectre Ledger is a satellite package around existing Spectre boundaries. It
 does not add a scheduler, a second canonical history, an outbox, or a replay
 engine to Spectre core.

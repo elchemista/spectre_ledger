@@ -80,7 +80,11 @@ defmodule SpectreLedger.InstanceIntegrationTest do
              )
 
     on_exit(fn ->
-      if Process.alive?(restored_instance), do: GenServer.stop(restored_instance, :normal)
+      try do
+        GenServer.stop(restored_instance, :normal)
+      catch
+        :exit, {:noproc, _} -> :ok
+      end
     end)
 
     assert {:ok, ^first_checkpoint} = Spectre.checkpoint(restored_instance)
@@ -120,6 +124,7 @@ defmodule SpectreLedger.InstanceIntegrationTest do
     assert receipt_report.object_count == length(receipts)
     assert receipt_report.state_digest_linkage
     refute receipt_report.deterministic_replay_claim
+    assert :ok = GenServer.stop(restored_instance, :normal)
   end
 
   defp flush_current(instance, attempts \\ 5)

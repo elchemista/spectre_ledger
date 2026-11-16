@@ -45,7 +45,7 @@ defmodule SpectreLedger.MixProject do
         {:spectre, path: Path.expand(path, __DIR__), override: true}
 
       _other ->
-        {:spectre, "~> 0.3.3"}
+        {:spectre, "~> 0.4.0"}
     end
   end
 
@@ -65,10 +65,14 @@ defmodule SpectreLedger.MixProject do
 
   defp docs do
     [
+      assets: %{"docs/assets" => "docs/assets"},
       main: "readme",
-      source_ref: @version,
+      source_ref: "feature/stack-tools-0.4",
       extras: [
         "README.md",
+        "docs/SPECTRE_0_4.md",
+        "docs/MIGRATING_TO_0_4.md",
+        "docs/INSTANCE_ARCHIVES.md",
         "CHANGELOG.md",
         "SECURITY.md",
         "docs/ARCHITECTURE.md",

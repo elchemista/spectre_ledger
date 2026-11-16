@@ -1,7 +1,11 @@
 # Spectre Ledger public API — 0.1.0
 
+[Current README](../README.md) · [AgentServer 0.4](SPECTRE_0_4.md) · [Migration](MIGRATING_TO_0_4.md)
+
+The archive/backend/receipt contracts below are the retained Instance APIs. The new AgentServer coordination Store has separate options, formats and compaction semantics.
+
 This file is the normative public API manifest for Spectre Ledger `0.1.0`,
-which targets Spectre `~> 0.3.3`. Compatibility guarantees apply only to the
+which targets Spectre `~> 0.4.0`. Compatibility guarantees apply only to the
 modules and callables listed below. Anything absent from this manifest is an
 implementation detail, even when exported by the BEAM.
 
@@ -21,12 +25,27 @@ Repo and requires the host to declare Ledger's optional `ecto_sql` and
 and verifies every declared module, function, macro, and callback against the
 application's compiled BEAM surface.
 
+## AgentServer coordination contract
+
+`ServerStore` is a distinct compacting Store, not the append-only Instance archive.
+Revisions are opaque; new/recreated keys use a global watermark. The generated
+`ledger/3` helper exposes only current-checkpoint metadata and is not a facade export.
+See [lifecycle and formats](SPECTRE_0_4.md).
+
 ## Manifest
+
+- `Spectre.Ledger.ServerStore`
+  - functions: `start_link/1`, `fetch/2`, `put_new/3`, `compare_and_swap/4`, `delete/3`, `list/2`, `list/3`, `entries/2`, `entries/3`, `compact/1`, `gam_ledger/1`, `gam_domain/1`
+
+- `Spectre.Ledger.ServerStore.Postgres`
+  - functions: `start_link/1`, `fetch/2`, `put_new/3`, `compare_and_swap/4`, `delete/3`, `list/2`, `list/3`, `migration_sql/0`, `migration_sql/1`, `gam_ledger/1`, `gam_domain/1`
+- `Spectre.Ledger.DomainStore`
+  - functions: `migration_sql/0`, `migration_sql/1`, `upgrade_sql/0`, `upgrade_sql/1`
 
 - `Mix.Tasks.SpectreLedger.Doctor`
 - `Mix.Tasks.SpectreLedger.Gen.Migration`
 - `Spectre.Ledger`
-  - functions: `version/0`, `checkpoint_store/0`, `checkpoint_store/1`, `receipt_sink/0`, `receipt_sink/1`, `receipt/1`, `receipt/2`, `receipt_payload/1`, `receipt_payload/2`, `receipt_entries/1`, `receipt_entries/2`, `receipts/1`, `receipts/2`, `inference_usage/1`, `inference_usage/2`, `verify_receipts/1`, `verify_receipts/2`, `head/1`, `head/2`, `entries/1`, `entries/2`, `verify/1`, `verify/2`, `export_bundle/1`, `export_bundle/2`, `import_bundle/1`, `import_bundle/2`
+  - functions: `tools/1`, `server_checkpoint_store/2`, `version/0`, `checkpoint_store/0`, `checkpoint_store/1`, `receipt_sink/0`, `receipt_sink/1`, `receipt/1`, `receipt/2`, `receipt_payload/1`, `receipt_payload/2`, `receipt_entries/1`, `receipt_entries/2`, `receipts/1`, `receipts/2`, `inference_usage/1`, `inference_usage/2`, `verify_receipts/1`, `verify_receipts/2`, `head/1`, `head/2`, `entries/1`, `entries/2`, `verify/1`, `verify/2`, `export_bundle/1`, `export_bundle/2`, `import_bundle/1`, `import_bundle/2`
 - `Spectre.Ledger.Backend`
   - callbacks: `load/2`, `compare_and_swap/2`, `head/2`, `entries/3`, `objects/3`, `migrate/5`, `put_stream/4`, `append_receipt/2`, `lookup_receipt/2`, `put_receipt_payload/2`, `get_receipt_payload/2`, `receipt_entries/3`, `receipt_objects/3`
 - `Spectre.Ledger.Backend.Conformance`
@@ -99,3 +118,15 @@ tests the required checkpoint archive. Receipt-backend conformance separately
 tests the optional sink and receipt archive capability. Neither runner
 certifies deployment durability, encryption, retention, authorization, backup,
 or topology.
+
+## Domain projection storage
+
+`Spectre.Ledger.DomainStore` implements `Spectre.GAM.Domain.Projection.Store`
+through `open/2`, `head/2`, `commit/5`, `fetch/4`, `page/4` and `select/5`;
+`migration_sql/0,1` supplies the application-owned DDL; `upgrade_sql/0,1`
+adds indexed selection columns to an existing derived projection table. Domain records and
+revision-fenced pages are administrative reads. The optional coordination
+callback `gam_domain/1` binds both history and projection on the host Repo.
+With this adapter the Domain retains its foundation and active work, loading
+historical dependencies for each command. Full views can still materialize
+history temporarily; paginated administrative reads avoid that cost.

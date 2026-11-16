@@ -1,6 +1,36 @@
 # Changelog
 
-All notable changes to Spectre Ledger are documented here.
+## Unreleased — Spectre 0.4
+
+### Added
+
+- AgentServer coordination Store with opaque CAS revisions, file compaction and
+  metadata-only checkpoint inspection.
+- PostgreSQL coordination storage on a host-owned Ecto Repo, with asynchronous
+  query workers, bounded keyset pages and revision tombstones.
+- `gam_domain/1` discovery for canonical GAM history and the persisted Domain read
+  model on the same Repo; `gam_ledger/1` remains available for history-only callers.
+- Atomic, revision-fenced projection updates and verified rebuild from canonical
+  history. Historical records can leave the live Domain after each command;
+  foundation, active frontiers and required dependency closures still consume RAM.
+- Real PostgreSQL integration and process/memory profiling probes, including
+  outage recovery, independent Domains and shared multi-agent resources.
+
+### Changed
+
+- Configured Stack resources supply Managed GAM coordination and approval storage.
+  Inbox history has no automatic purge or mandatory quota.
+- File compaction removes superseded values and tombstones while preserving a
+  global revision watermark, private file initialization and durability barriers.
+- Require Spectre `~> 0.4.0` and Ecto 3.14.3; support explicit local source overrides.
+
+### Compatibility
+
+- Install coordination, GAM history and Domain projection tables through
+  application migrations; upgrade existing derived indexes before startup.
+- Existing SPLS1/SPLS2 files remain readable. Compaction writes checkpoint-v2;
+  disk history is not automatically migrated into PostgreSQL.
+- Instance checkpoint/receipt archives and Bundle v1 remain separate APIs.
 
 ## 0.1.0
 
