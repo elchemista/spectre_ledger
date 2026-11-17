@@ -147,6 +147,56 @@ defmodule Spectre.Ledger.ServerStoreTest do
   end
 
   @tag :tmp_dir
+  test "prepared metadata requests remain scoped and reject unbounded history", %{tmp_dir: dir} do
+    store = start_supervised!({ServerStore, path: Path.join(dir, "prepared.ledger")})
+    value = %{private: "application checkpoint"}
+    {:ok, 1} = ServerStore.put_new(store, :own, value)
+    context = %{checkpoint_ref: %{adapter: ServerStore, store: store, key: :own}}
+    {:ok, bytes} = Spectre.Server.Checkpoint.encode_value(value)
+
+    for args <- [[], [:own]] do
+      assert {:ok, request} = Spectre.Ledger.ServerTool.prepare(:head, args, %{})
+      assert {:ok, metadata} = Spectre.Ledger.ServerTool.invoke(:head, request, context)
+      assert metadata.bytes == byte_size(bytes)
+      assert Map.keys(metadata) |> Enum.sort() == [:bytes, :digest, :revision]
+      assert {:ok, ^metadata} = Spectre.Ledger.ServerTool.project(:head, metadata)
+    end
+
+    for args <- [[], [:own], [:own, 1]] do
+      assert {:ok, request} = Spectre.Ledger.ServerTool.prepare(:entries, args, %{})
+
+      assert {:ok, [%{revision: 1}]} =
+               Spectre.Ledger.ServerTool.invoke(:entries, request, context)
+    end
+
+    assert {:ok, other} = Spectre.Ledger.ServerTool.prepare(:head, [:other], %{})
+
+    assert {:error, :checkpoint_scope_mismatch} =
+             Spectre.Ledger.ServerTool.invoke(:head, other, context)
+
+    for {operation, args} <- [{:entries, [:own, 0]}, {:entries, [:own, 1001]}, {:delete, [:own]}] do
+      assert {:error, :invalid_ledger_tool_request} =
+               Spectre.Ledger.ServerTool.prepare(operation, args, %{})
+    end
+  end
+
+  @tag :tmp_dir
+  test "missing checkpoints and backends without history stay explicit", %{tmp_dir: dir} do
+    store = start_supervised!({ServerStore, path: Path.join(dir, "missing.ledger")})
+    context = %{checkpoint_ref: %{adapter: ServerStore, store: store, key: :missing}}
+    assert :not_found = Spectre.Ledger.ServerTool.invoke(:head, %{scope: :current}, context)
+
+    without_history = put_in(context.checkpoint_ref.adapter, Spectre.Server.Store.Disk)
+
+    assert {:error, :checkpoint_history_unavailable} =
+             Spectre.Ledger.ServerTool.invoke(
+               :entries,
+               %{scope: :current, limit: 1},
+               without_history
+             )
+  end
+
+  @tag :tmp_dir
   test "automatic compaction preserves live facts and revision fences across a kill", %{
     tmp_dir: dir
   } do
