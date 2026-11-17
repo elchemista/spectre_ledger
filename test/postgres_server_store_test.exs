@@ -7,10 +7,15 @@ end
 defmodule SpectreLedger.PostgresServerStoreTest do
   use ExUnit.Case, async: false
   alias Ecto.Adapters.SQL
+  alias Spectre.GAM.Canonical.Value
+  alias Spectre.GAM.Domain.Projection
   alias Spectre.GAM.Domain.Projection.Rows
   alias Spectre.GAM.Domain.Projection.Store, as: ProjectionStore
+  alias Spectre.GAM.Ledger
   alias Spectre.Ledger.ServerStore
   alias Spectre.Ledger.ServerStore.Postgres
+  alias Spectre.Server.Checkpoint
+  alias Spectre.Server.GAM.Managed
   alias SpectreLedger.ServerStoreTestRepo, as: Repo
   alias SpectreLedger.TestPostgresCluster, as: Cluster
 
@@ -1226,6 +1231,183 @@ defmodule SpectreLedger.PostgresServerStoreTest do
       20 ->
         if Process.alive?(parent), do: sample_memory(domain, parent, peak), else: peak
     end
+  end
+
+  test "reset keeps PostgreSQL history and selects an isolated generation across restart", c do
+    Process.register(self(), __MODULE__)
+    target_opts = reset_options(c.store, :reset_target)
+    target = start_supervised!({Spectre.Server, target_opts})
+    other = start_supervised!({Spectre.Server, reset_options(c.store, :reset_other)})
+    settled_input(target, "https://before-reset.test")
+    settled_input(other, "https://other-agent.test")
+
+    original = :sys.get_state(target)
+    old_domain = Managed.info(original.managed_owner).domain
+    other_state = :sys.get_state(other)
+    other_domain = Managed.info(other_state.managed_owner).domain
+    other_session = Spectre.Server.status(other).session
+    {:ok, %{ledger: ledger}} = ServerStore.gam_domain(c.store)
+    {:ok, old_head} = Ledger.Store.head(ledger, old_domain)
+    {:ok, other_head} = Ledger.Store.head(ledger, other_domain)
+    old_key = {:managed_agent, old_domain}
+    {:ok, old_checkpoint} = ServerStore.fetch(c.store, old_key)
+
+    assert :ok = Spectre.Server.reset(target)
+    selected_session = Spectre.Server.status(target).session
+    selected = :sys.get_state(target)
+    selected_domain = Managed.info(selected.managed_owner).domain
+    assert selected_domain != old_domain
+    assert selected.history == []
+    assert selected.opts[:checkpoint] == {ServerStore, c.store, {:managed_agent, selected_domain}}
+    assert {:ok, ^old_head} = Ledger.Store.head(ledger, old_domain)
+    assert {:ok, ^old_checkpoint} = ServerStore.fetch(c.store, old_key)
+    assert {:ok, archived} = Ledger.Store.load(ledger, old_domain, [])
+    assert {:ok, _} = Ledger.verify_snapshot(archived)
+    assert {:ok, history} = Projection.replay(archived)
+
+    assert Enum.any?(history.acts, fn {_, act} ->
+             act.consequence["payload"] == %{url: "https://before-reset.test"}
+           end)
+
+    assert Spectre.Server.status(other).session == other_session
+    assert :sys.get_state(other).history == other_state.history
+
+    assert Managed.info(:sys.get_state(other).managed_owner).domain ==
+             other_domain
+
+    assert {:ok, ^other_head} = Ledger.Store.head(ledger, other_domain)
+    settled_input(target, "https://after-reset.test")
+    new_key = {:managed_agent, selected_domain}
+    assert {:ok, %{value: checkpoint}} = ServerStore.fetch(c.store, new_key)
+    assert {:ok, saved} = Checkpoint.decode_snapshot(checkpoint)
+    assert [%{user: "https://after-reset.test"}] = saved.history
+    pointer_key = {:spectre_server_session, old_domain}
+
+    assert {:ok, %{value: %{generation: generation} = pointer}} =
+             ServerStore.fetch(c.store, pointer_key)
+
+    assert selected_domain == old_domain <> ":session:" <> generation
+    assert generation == selected_session
+    assert {:ok, encoded_pointer_key} = Value.encode(pointer_key)
+    assert {:ok, encoded_pointer} = Value.encode(pointer)
+
+    assert %{rows: [[^encoded_pointer, false]]} =
+             SQL.query!(
+               Repo,
+               "SELECT value,deleted FROM \"#{c.table}\" WHERE key=$1",
+               [
+                 encoded_pointer_key
+               ],
+               log: false
+             )
+
+    assert %{rows: rows} =
+             SQL.query!(Repo, "SELECT DISTINCT domain_ref FROM \"#{c.table}_gam_batches\"", [],
+               log: false
+             )
+
+    assert MapSet.new(rows, &hd/1) == MapSet.new([old_domain, selected_domain, other_domain])
+    :ok = stop_supervised(:reset_target)
+    restored = start_supervised!({Spectre.Server, target_opts})
+    assert Spectre.Server.status(restored).session == selected_session
+    restored_state = :sys.get_state(restored)
+    assert Managed.info(restored_state.managed_owner).domain == selected_domain
+    assert restored_state.history == saved.history
+    assert {:ok, ^old_checkpoint} = ServerStore.fetch(c.store, old_key)
+    assert {:ok, ^other_head} = Ledger.Store.head(ledger, other_domain)
+
+    assert %{rows: [[3]]} =
+             SQL.query!(Repo, "SELECT count(*) FROM \"#{c.table}_gam_projection_heads\"", [],
+               log: false
+             )
+  end
+
+  @tag :capture_log
+  test "an explicit RAM reset works with PostgreSQL offline and retains its durable selection",
+       c do
+    Process.register(self(), __MODULE__)
+    opts = reset_options(c.store, :offline_reset)
+    server = start_supervised!({Spectre.Server, opts})
+    original_domain = Managed.info(:sys.get_state(server).managed_owner).domain
+    assert :ok = Spectre.Server.reset(server)
+    settled_input(server, "https://durable-before-outage.test")
+    durable_session = Spectre.Server.status(server).session
+    durable_domain = Managed.info(:sys.get_state(server).managed_owner).domain
+    {:ok, %{ledger: ledger}} = ServerStore.gam_domain(c.store)
+    {:ok, durable_head} = Ledger.Store.head(ledger, durable_domain)
+    pointer_key = {:spectre_server_session, original_domain}
+    {:ok, pointer} = ServerStore.fetch(c.store, pointer_key)
+
+    {_, 0} =
+      System.cmd("pg_ctl", ["-D", c.cluster.data, "-m", "fast", "-w", "stop"],
+        stderr_to_stdout: true
+      )
+
+    memory_domain =
+      try do
+        assert :ok = Spectre.Server.reset(server, storage: :ephemeral, timeout: 10_000)
+        assert Spectre.Server.status(server).session != durable_session
+        assert :sys.get_state(server).history == []
+        settled_input(server, "https://only-in-ram.test")
+        domain = Managed.info(:sys.get_state(server).managed_owner).domain
+        :ok = stop_supervised(:offline_reset)
+        domain
+      after
+        {_, 0} =
+          System.cmd(
+            "pg_ctl",
+            [
+              "-D",
+              c.cluster.data,
+              "-l",
+              Path.join(c.cluster.root, "postgres.log"),
+              "-o",
+              "-F -k #{c.cluster.socket} -p #{c.cluster.port} -h ''",
+              "-w",
+              "start"
+            ],
+            stderr_to_stdout: true
+          )
+
+        :ok = SQL.disconnect_all(Repo, 0)
+        await_database_pool(24, 100)
+      end
+
+    assert {:ok, ^pointer} = ServerStore.fetch(c.store, pointer_key)
+    assert {:ok, ^durable_head} = Ledger.Store.head(ledger, durable_domain)
+    restored = start_supervised!({Spectre.Server, opts})
+    assert Spectre.Server.status(restored).session == durable_session
+    restored_state = :sys.get_state(restored)
+    assert Managed.info(restored_state.managed_owner).domain == durable_domain
+    assert [%{user: "https://durable-before-outage.test"}] = restored_state.history
+
+    assert %{rows: [[0]]} =
+             SQL.query!(
+               Repo,
+               "SELECT count(*) FROM \"#{c.table}_gam_batches\" WHERE domain_ref=$1",
+               [memory_domain],
+               log: false
+             )
+  end
+
+  defp reset_options(store, id) do
+    [
+      id: id,
+      agent: Agent,
+      consumer: self(),
+      identity: %{subject: Atom.to_string(id), conversation: "postgres-reset"},
+      gam: [storage: :ledger, store: {ServerStore, store}, operations: %{open: [confirm: false]}]
+    ]
+  end
+
+  defp settled_input(server, url) do
+    assert {:ok, _} = Spectre.Server.input(server, url)
+    assert_receive {:opened, %{url: ^url}}, 5_000
+
+    assert_receive {:server_settled, ^server, {:governed, %{outcome: %{status: :succeeded}}}},
+                   5_000
+
+    assert %{busy: false, outbox_size: 0} = Spectre.Server.status(server)
   end
 
   @tag timeout: 120_000
