@@ -102,8 +102,8 @@ adapter below implements the AgentServer Store contract directly.
 The `ledger` helper reads the calling Server's checkpoint metadata, including in
 mounted Skills. A mount shares its root's GAM Domain while keeping a distinct
 checkpoint. Stack resources remain host-supervised. See the
-[core Skill guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md) and
-[Server command lifecycle](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/STACK_TOOLS.md).
+[core Skill guide](https://github.com/elchemista/spectre/blob/0.4.0/docs/SKILLS.md) and
+[Server command lifecycle](https://github.com/elchemista/spectre/blob/0.4.0/docs/STACK_TOOLS.md).
 
 ## PostgreSQL coordination Store and approval inbox
 
@@ -232,7 +232,7 @@ Without a projection adapter the original RAM mode is unchanged. The pure Fold
 and kernel use the same rules in both modes. Existing projection installations
 must apply `Spectre.Ledger.DomainStore.upgrade_sql/1` in a migration before
 starting the updated runtime. These are derived indexes, not another journal. See the core's
-[profile](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/OTP_PROFILE_0_4.md).
+[profile](https://github.com/elchemista/spectre/blob/0.4.0/docs/OTP_PROFILE_0_4.md).
 
 ### Coordination query execution
 
@@ -255,7 +255,7 @@ and exact signed terminal decision in the same record. IDs are scoped by receive
 and sender; atomic insertion rejects conflicting retransmissions. There is no
 automatic expiry deletion, inbox quota or cache of historical records in the
 AgentServer. UI pages and developer policy callbacks are documented in the
-[core approval guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/EXTERNAL_APPROVALS.md).
+[core approval guide](https://github.com/elchemista/spectre/blob/0.4.0/docs/EXTERNAL_APPROVALS.md).
 Explicit Store deletion preserves a SQL revision tombstone; database retention
 and any eventual physical removal remain application policy. PostgreSQL exposes
 current records and opaque revisions, not the file log's `entries/3` or compaction.
@@ -267,7 +267,7 @@ A host may opt into private volatile buffering and retry after recovery; the
 library never acknowledges that buffer as a durable approval. The callback's
 outage branch may update private state only. The authenticated consumer receives
 the technical error event even without a custom callback. See the
-[database outage policy](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/EXTERNAL_APPROVALS.md#database-outage-policy).
+[database outage policy](https://github.com/elchemista/spectre/blob/0.4.0/docs/EXTERNAL_APPROVALS.md#database-outage-policy).
 
 ## Payloads and storage policy
 
@@ -276,7 +276,7 @@ requests can contain operation material and rendered arguments. Configure the
 Server's `payload_store: {MyApp.Payloads, options}` to keep protected bodies in
 application-owned storage; the handler implements `put/3` and `fetch/3` and chooses
 its reference format, encryption and retention. See
-[payload storage](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/PAYLOAD_STORAGE.md). Protect database access and backups
+[payload storage](https://github.com/elchemista/spectre/blob/0.4.0/docs/PAYLOAD_STORAGE.md). Protect database access and backups
 according to the application's disclosure policy.
 
 ## Reproducible OTP diagnostics

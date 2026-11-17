@@ -1,6 +1,6 @@
 # Spectre Ledger — standalone and retained runtime reference
 
-For the retained core runtime APIs, see the [compatibility index](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/COMPATIBILITY.md).
+For the retained core runtime APIs, see the [compatibility index](https://github.com/elchemista/spectre/blob/0.4.0/docs/COMPATIBILITY.md).
 
 This guide describes the retained Instance checkpoint and boundary-receipt archives, including Memory/PostgreSQL backends, bundles and receipt inspection. They are separate from the compacting AgentServer `ServerStore`; options and revision formats are not interchangeable.
 

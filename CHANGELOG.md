@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Spectre 0.4
+## 0.1.0 — 2026-11-17
 
 ### Added
 

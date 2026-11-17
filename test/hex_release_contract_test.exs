@@ -24,6 +24,7 @@ defmodule SpectreLedger.HexReleaseContractTest do
 
   test "Mix and Hex metadata describe the 0.1.0 release for Spectre 0.4.0" do
     config = Mix.Project.config()
+    assert config[:docs][:source_ref] == config[:version]
     package = Keyword.fetch!(config, :package)
 
     assert config[:version] == @version

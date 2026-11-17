@@ -25,25 +25,20 @@ This is the `gam: [storage: :ledger]` configuration described in the
 uses a compacting coordination log and a separate GAM directory. Without a
 persistent projection adapter, Spectre can continue in its ordinary RAM mode.
 
-## Installation on the 0.4 development branch
+## Installation
 
-This branch targets the **unreleased Spectre 0.4 architecture**. Use matching Git
-branches; the examples do not assume that Spectre 0.4 is available from Hex.
-For reproducible deployments, replace branch selectors with reviewed commit refs.
+Add the packages to your application:
 
 ```elixir
-def deps do
+defp deps do
   [
-    {:spectre, github: "elchemista/spectre",
-     branch: "feature/agent-server-gam", override: true},
-    {:spectre_ledger, github: "elchemista/spectre_ledger",
-     branch: "feature/stack-tools-0.4"}
+    {:spectre, "~> 0.4.0"},
+    {:spectre_ledger, "~> 0.1.0"}
   ]
 end
 ```
 
-The manifest requirement `{:spectre, "~> 0.4.0"}` describes compatibility, not
-publication availability. Local contributors can use `SPECTRE_PATH=../spectre` for this repository's dependency override.
+For local development, use `SPECTRE_PATH=../spectre` when testing this repository.
 
 ## Persist and inspect an AgentServer
 
@@ -138,7 +133,7 @@ neither requires one database connection or one Repo per agent.
 - [Migration from the 0.3 integration](docs/MIGRATING_TO_0_4.md)
 - [Standalone and retained runtime reference](docs/INSTANCE_ARCHIVES.md)
 - [Public API](docs/PUBLIC_API.md) and [changelog](CHANGELOG.md)
-- [Governed Act Model](https://spectre.guide/en/governed-act-model) and [core tool lifecycle](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/STACK_TOOLS.md)
+- [Governed Act Model](https://spectre.guide/en/governed-act-model) and [core tool lifecycle](https://github.com/elchemista/spectre/blob/0.4.0/docs/STACK_TOOLS.md)
 
 ## Use inside a reusable Skill
 
@@ -146,7 +141,7 @@ The generated `ledger` helper also works in Skill Server callbacks using the sam
 Stack. Each mount has its own process, state and checkpoint; governed operations
 share the root AgentServer's GAM Domain and must satisfy both root operations
 and mount `governed:` permissions. Ledger and Lab helpers inspect only the calling Server checkpoint. See the
-[core Skill guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md) for ownership and consent.
+[core Skill guide](https://github.com/elchemista/spectre/blob/0.4.0/docs/SKILLS.md) for ownership and consent.
 
 ## Contributing
 

@@ -1,9 +1,8 @@
 # Migrate Ledger integration from 0.3 to 0.4
 
-This guide targets the current unreleased development branch, not a published
-Hex release. Start with the matching Git dependencies in the [README](../README.md).
-The package's compatibility requirement is Spectre `~> 0.4.0`; use the core
-`feature/agent-server-gam` and satellite `feature/stack-tools-0.4` branches together.
+This guide covers integration with Spectre `~> 0.4.0`. Install the compatible
+package versions shown in the [README](../README.md), then follow the ownership
+and callback changes below. Satellite versions remain independent of core.
 
 ## Move ownership, preserve capabilities
 
@@ -18,7 +17,7 @@ The package's compatibility requirement is Spectre `~> 0.4.0`; use the core
 Keep routes in the Agent and move execution callbacks to
 `use Spectre.Server, tools: MyApp.AI`. Return the context produced by `ledger`
 and handle its tagged result in `handle_result/3`. The
-[core migration guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/MIGRATING_TO_0_4.md) covers shared Server, GAM and
+[core migration guide](https://github.com/elchemista/spectre/blob/0.4.0/docs/MIGRATING_TO_0_4.md) covers shared Server, GAM and
 checkpoint changes; old Instance snapshots are not AgentServer snapshots.
 
 ## What remains available
@@ -33,5 +32,5 @@ implicitly routes through AgentServer or GAM.
 ## Skill Servers
 
 Mounted Skills share their root's GAM Domain and retain separate checkpoints.
-Follow the [core Skill guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md); this package requires no separate
+Follow the [core Skill guide](https://github.com/elchemista/spectre/blob/0.4.0/docs/SKILLS.md); this package requires no separate
 Skill host or second GAM configuration.
