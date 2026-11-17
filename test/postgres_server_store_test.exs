@@ -1448,30 +1448,40 @@ defmodule SpectreLedger.PostgresServerStoreTest do
 
     assert map_size(servers) == 100
 
-    servers
-    |> Task.async_stream(
-      fn {id, server} -> Spectre.Server.input(server, "https://fixture.test/agent/#{id}") end,
-      max_concurrency: 16,
-      timeout: 30_000
-    )
-    |> Enum.each(fn result -> assert {:ok, {:ok, _}} = result end)
+    # Input acknowledges admission. Hold each batch until result callbacks have
+    # crossed their checkpoint barrier, rather than queuing all 100 operations.
+    {opened, settled} =
+      servers
+      |> Enum.chunk_every(16)
+      |> Enum.reduce({[], []}, fn batch, {opened, settled} ->
+        batch
+        |> Task.async_stream(
+          fn {id, server} -> Spectre.Server.input(server, "https://fixture.test/agent/#{id}") end,
+          max_concurrency: 16,
+          timeout: 30_000
+        )
+        |> Enum.each(fn result -> assert {:ok, {:ok, _}} = result end)
 
-    opened =
-      for _ <- 1..100 do
-        assert_receive {:opened, %{url: url}}, 30_000
-        url
-      end
+        batch_opened =
+          for _ <- batch do
+            assert_receive {:opened, %{url: url}}, 30_000
+            url
+          end
+
+        batch_settled =
+          for _ <- batch do
+            assert_receive {:server_settled, server,
+                            {:governed, %{outcome: %{status: :succeeded}}}},
+                           30_000
+
+            assert %{busy: false, outbox_size: 0} = Spectre.Server.status(server)
+            server
+          end
+
+        {batch_opened ++ opened, batch_settled ++ settled}
+      end)
 
     assert MapSet.new(opened) == MapSet.new(1..100, &"https://fixture.test/agent/#{&1}")
-
-    settled =
-      for _ <- 1..100 do
-        assert_receive {:server_settled, server, {:governed, %{outcome: %{status: :succeeded}}}},
-                       30_000
-
-        server
-      end
-
     assert MapSet.new(settled) == MapSet.new(Map.values(servers))
     assert {:ok, %{ledger: history, projection: persisted}} = ServerStore.gam_domain(shared_store)
 
